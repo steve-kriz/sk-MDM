@@ -119,13 +119,15 @@ export interface CheckInRequest {
   }>;
 }
 
-/** Response to `POST /api/v1/devices/{deviceId}/checkin`. */
+/**
+ * Response to `POST /api/v1/devices/{deviceId}/checkin`.
+ *
+ * The key set is exactly these two. No policy information is carried here: a
+ * device's policies come from `GET /api/v1/devices/{deviceId}/policies`.
+ */
 export interface CheckInResponse {
-  deviceId: string;
-  /** Server receive time, ISO-8601 UTC. */
-  receivedAt: string;
   /** How long the agent should wait before the next check-in. */
-  nextCheckInSeconds: number;
+  checkInIntervalSeconds: number;
   /** Commands waiting to be leased, so the agent can skip an empty poll. */
   pendingCommandCount: number;
 }
