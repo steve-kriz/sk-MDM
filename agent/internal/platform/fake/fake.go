@@ -239,6 +239,39 @@ func (f *FS) Stat(path string) (fs.FileInfo, error) {
 	return fileInfo{name: baseName(path), size: int64(len(file.data)), mode: file.perm, mod: file.mod}, nil
 }
 
+// ReadDir lists the files whose parent directory is path, sorted by name.
+//
+// The fake holds files only, so no sub-directory is ever reported, and a
+// directory nobody has written a file into reads back empty rather than
+// missing: writing to a path whose parent was never created succeeds here, so
+// listing one must not fail either.
+func (f *FS) ReadDir(path string) ([]fs.DirEntry, error) {
+	if f.ReadErr != nil {
+		if err := f.ReadErr(path); err != nil {
+			return nil, &fs.PathError{Op: "readdir", Path: path, Err: err}
+		}
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	dir := strings.TrimRight(path, `/\`)
+	entries := make([]fs.DirEntry, 0, len(f.files))
+	for candidate, file := range f.files {
+		if dirName(candidate) != dir {
+			continue
+		}
+		entries = append(entries, dirEntry{fileInfo{
+			name: baseName(candidate),
+			size: int64(len(file.data)),
+			mode: file.perm,
+			mod:  file.mod,
+		}})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	return entries, nil
+}
+
 // MkdirAll records the directory.
 func (f *FS) MkdirAll(path string, _ fs.FileMode) error {
 	f.mu.Lock()
@@ -256,6 +289,16 @@ func baseName(path string) string {
 	return path
 }
 
+// dirName is everything before the last path element, under either separator,
+// with no trailing separator. It is baseName's other half and is what ReadDir
+// groups files by.
+func dirName(path string) string {
+	if i := strings.LastIndexAny(path, `/\`); i >= 0 {
+		return path[:i]
+	}
+	return ""
+}
+
 type fileInfo struct {
 	name string
 	size int64
@@ -269,6 +312,16 @@ func (i fileInfo) Mode() fs.FileMode  { return i.mode }
 func (i fileInfo) ModTime() time.Time { return i.mod }
 func (i fileInfo) IsDir() bool        { return false }
 func (i fileInfo) Sys() any           { return nil }
+
+// dirEntry is one ReadDir result, over the same fileInfo Stat returns.
+type dirEntry struct {
+	info fileInfo
+}
+
+func (e dirEntry) Name() string               { return e.info.name }
+func (e dirEntry) IsDir() bool                { return false }
+func (e dirEntry) Type() fs.FileMode          { return e.info.mode.Type() }
+func (e dirEntry) Info() (fs.FileInfo, error) { return e.info, nil }
 
 // Command is one recorded call to CommandRunner.Run.
 type Command struct {

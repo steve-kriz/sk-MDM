@@ -73,6 +73,9 @@ func (OSFileSystem) Remove(path string) error { return os.Remove(path) }
 // Stat reports on path.
 func (OSFileSystem) Stat(path string) (fs.FileInfo, error) { return os.Stat(path) }
 
+// ReadDir lists the directory at path, sorted by file name.
+func (OSFileSystem) ReadDir(path string) ([]fs.DirEntry, error) { return os.ReadDir(path) }
+
 // MkdirAll creates path and every missing parent.
 func (OSFileSystem) MkdirAll(path string, perm fs.FileMode) error {
 	return os.MkdirAll(path, perm)

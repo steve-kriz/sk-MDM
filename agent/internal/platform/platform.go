@@ -49,6 +49,11 @@ type FileSystem interface {
 	// Stat reports on path, principally its size for log rotation.
 	Stat(path string) (fs.FileInfo, error)
 
+	// ReadDir lists the entries of the directory at path, sorted by file
+	// name. It is what lets the check-in spool find the payloads an earlier
+	// run left behind without keeping an index of its own.
+	ReadDir(path string) ([]fs.DirEntry, error)
+
 	// MkdirAll creates path and every missing parent.
 	MkdirAll(path string, perm fs.FileMode) error
 }
