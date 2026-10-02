@@ -1,0 +1,38 @@
+#!/bin/sh
+set -e
+# Runs as root at the end of the package install.
+#
+# It writes the agent config from the values the build substituted into this
+# script, locks that file down because it carries the enrollment token, and
+# only then bootstraps the LaunchDaemon: the agent must never start able to
+# read a config other accounts could have read or rewritten first.
+#
+# The two placeholders in the config below are replaced by
+# installers/macos/build.sh when it stages this script into the package.
+# set -e above means any failing step below aborts the install with a non-zero
+# status rather than leaving a half-configured daemon loaded.
+
+mkdir -p "/Library/Application Support/OfficeHQ/MDM"
+mkdir -p /Library/Logs/OfficeHQ
+
+cat > "/Library/Application Support/OfficeHQ/MDM/config.json" <<EOF
+{
+  "collectionUrl": "__COLLECTION_URL__",
+  "enrollmentToken": "__ENROLL_TOKEN__",
+  "checkInIntervalSeconds": 900,
+  "logLevel": "info"
+}
+EOF
+
+chmod 600 "/Library/Application Support/OfficeHQ/MDM/config.json"
+chown root:wheel "/Library/Application Support/OfficeHQ/MDM/config.json"
+
+chown root:wheel /usr/local/bin/mdmagent
+chmod 755 /usr/local/bin/mdmagent
+
+chown root:wheel /Library/LaunchDaemons/au.com.officehq.mdmagent.plist
+chmod 644 /Library/LaunchDaemons/au.com.officehq.mdmagent.plist
+
+launchctl bootstrap system /Library/LaunchDaemons/au.com.officehq.mdmagent.plist
+
+exit 0

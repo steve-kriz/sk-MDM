@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+    <title>OfficeHQ MDM Agent</title>
+    <organization>au.com.officehq</organization>
+    <options customize="never" hostArchitectures="x86_64,arm64" rootVolumeOnly="true"/>
+    <volume-check>
+        <allowed-os-versions>
+            <os-version min="12.0"/>
+        </allowed-os-versions>
+    </volume-check>
+    <choices-outline>
+        <line choice="au.com.officehq.mdm.agent"/>
+    </choices-outline>
+    <choice id="au.com.officehq.mdm.agent" title="OfficeHQ MDM Agent" visible="false">
+        <pkg-ref id="au.com.officehq.mdm.agent"/>
+    </choice>
+    <pkg-ref id="au.com.officehq.mdm.agent" onConclusion="none">component.pkg</pkg-ref>
+</installer-gui-script>

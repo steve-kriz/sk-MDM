@@ -1,0 +1,6 @@
+# The scripts in this directory run under /bin/sh on macOS, and a shebang line
+# ending in CR is not an interpreter path any Mac can resolve. They stay LF on
+# checkout whatever a Windows clone's core.autocrlf is set to.
+*.sh text eol=lf
+preinstall text eol=lf
+postinstall text eol=lf
