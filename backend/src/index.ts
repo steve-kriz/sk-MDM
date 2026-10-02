@@ -288,7 +288,7 @@ export {
   registerUiRoutes,
   serveAsset,
 } from './ui/index.js';
-export { ADMIN_SCOPE_NAME, CONFIG_KEYS, adminClientConfig, adminScope } from './ui/config.js';
+export { ADMIN_SCOPE_NAME, CONFIG_KEYS, adminClientConfig, adminScope, publicHost } from './ui/config.js';
 export type { AdminClientConfig, ConfigEnv } from './ui/config.js';
 export { collectionUrl } from './ui/settings.js';
 export type { SettingsEnv } from './ui/settings.js';

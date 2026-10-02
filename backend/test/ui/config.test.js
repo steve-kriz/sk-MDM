@@ -8,7 +8,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert';
-import { handler, adminClientConfig, CONFIG_KEYS } from '../../dist/index.js';
+import { handler, adminClientConfig, CONFIG_KEYS, publicHost, collectionUrl } from '../../dist/index.js';
 
 test('Unit - adminClientConfig builds valid config when env vars present', async (t) => {
   const config = adminClientConfig(
@@ -195,6 +195,122 @@ test('Scenario: Configuration never leaks server secrets', async (t) => {
   // Config keys should only be the public ones
   const keys = Object.keys(config).sort();
   assert.deepStrictEqual(keys, ['tenantId', 'clientId', 'redirectUri', 'scope']);
+});
+
+// ============================================================================
+// TASK-028: publicHost and PUBLIC_HOST-aware /admin/config.json
+// ============================================================================
+
+test('E2E: Scenario: publicHost prefers the configured host', async (t) => {
+  // publicHost({PUBLIC_HOST: "mdm.officehq.cc"}, "abc.lambda-url.ap-southeast-2.on.aws") is "mdm.officehq.cc"
+  assert.strictEqual(
+    publicHost({ PUBLIC_HOST: 'mdm.officehq.cc' }, 'abc.lambda-url.ap-southeast-2.on.aws'),
+    'mdm.officehq.cc'
+  );
+
+  // publicHost({PUBLIC_HOST: ""}, "abc.lambda-url.ap-southeast-2.on.aws") is "abc.lambda-url.ap-southeast-2.on.aws"
+  assert.strictEqual(
+    publicHost({ PUBLIC_HOST: '' }, 'abc.lambda-url.ap-southeast-2.on.aws'),
+    'abc.lambda-url.ap-southeast-2.on.aws'
+  );
+
+  // publicHost({}, "abc.lambda-url.ap-southeast-2.on.aws") is "abc.lambda-url.ap-southeast-2.on.aws"
+  assert.strictEqual(publicHost({}, 'abc.lambda-url.ap-southeast-2.on.aws'), 'abc.lambda-url.ap-southeast-2.on.aws');
+});
+
+test('E2E: Scenario: Console redirect URI uses the public domain behind CloudFront', async (t) => {
+  // Given PUBLIC_HOST is "mdm.officehq.cc" and ENTRA_TENANT_ID and ENTRA_CLIENT_ID are set
+  const saved = {
+    PUBLIC_HOST: process.env.PUBLIC_HOST,
+    ENTRA_TENANT_ID: process.env.ENTRA_TENANT_ID,
+    ENTRA_CLIENT_ID: process.env.ENTRA_CLIENT_ID,
+  };
+  process.env.PUBLIC_HOST = 'mdm.officehq.cc';
+  process.env.ENTRA_TENANT_ID = 't-1';
+  process.env.ENTRA_CLIENT_ID = 'c-9';
+
+  try {
+    // When I GET "/admin/config.json" with header host "abc.lambda-url.ap-southeast-2.on.aws"
+    const event = {
+      requestContext: { http: { method: 'GET', path: '/admin/config.json' } },
+      headers: { host: 'abc.lambda-url.ap-southeast-2.on.aws' },
+    };
+    const response = await handler(event);
+
+    // Then the status is 200 and redirectUri is "https://mdm.officehq.cc/admin"
+    assert.strictEqual(response.statusCode, 200);
+    const config = JSON.parse(response.body);
+    assert.strictEqual(config.redirectUri, 'https://mdm.officehq.cc/admin');
+  } finally {
+    // Restore PUBLIC_HOST (and the Entra vars) afterwards.
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('E2E: Scenario: Empty PUBLIC_HOST falls back to the Host header', async (t) => {
+  // Given PUBLIC_HOST is "" and ENTRA_TENANT_ID and ENTRA_CLIENT_ID are set
+  const saved = {
+    PUBLIC_HOST: process.env.PUBLIC_HOST,
+    ENTRA_TENANT_ID: process.env.ENTRA_TENANT_ID,
+    ENTRA_CLIENT_ID: process.env.ENTRA_CLIENT_ID,
+  };
+  process.env.PUBLIC_HOST = '';
+  process.env.ENTRA_TENANT_ID = 't-1';
+  process.env.ENTRA_CLIENT_ID = 'c-9';
+
+  try {
+    // When I GET "/admin/config.json" with header host "abc.lambda-url.ap-southeast-2.on.aws"
+    const event = {
+      requestContext: { http: { method: 'GET', path: '/admin/config.json' } },
+      headers: { host: 'abc.lambda-url.ap-southeast-2.on.aws' },
+    };
+    const response = await handler(event);
+
+    // Then redirectUri is "https://abc.lambda-url.ap-southeast-2.on.aws/admin"
+    assert.strictEqual(response.statusCode, 200);
+    const config = JSON.parse(response.body);
+    assert.strictEqual(config.redirectUri, 'https://abc.lambda-url.ap-southeast-2.on.aws/admin');
+  } finally {
+    // Restore PUBLIC_HOST (and the Entra vars) afterwards.
+    for (const [key, value] of Object.entries(saved)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+});
+
+test('Unit: publicHost with PUBLIC_HOST unset (no key at all) falls back to the host header', async (t) => {
+  assert.strictEqual(publicHost({}, 'fallback.example.com'), 'fallback.example.com');
+});
+
+// ============================================================================
+// TASK-028: collectionUrl prefers the custom domain (backend/src/ui/settings.ts)
+// ============================================================================
+
+test('E2E: Scenario: Settings collection URL is the custom domain', async (t) => {
+  // Given COLLECTION_URL is "https://mdm.officehq.cc/" and AWS_LAMBDA_FUNCTION_URL is "https://abc.lambda-url.ap-southeast-2.on.aws/"
+  const env = {
+    COLLECTION_URL: 'https://mdm.officehq.cc/',
+    AWS_LAMBDA_FUNCTION_URL: 'https://abc.lambda-url.ap-southeast-2.on.aws/',
+  };
+
+  // When I call collectionUrl(env)
+  const result = collectionUrl(env);
+
+  // Then it returns "https://mdm.officehq.cc/"
+  assert.strictEqual(result, 'https://mdm.officehq.cc/');
+});
+
+test('Unit: collectionUrl falls back to AWS_LAMBDA_FUNCTION_URL when COLLECTION_URL is unset (existing behaviour unchanged)', async (t) => {
+  const env = { AWS_LAMBDA_FUNCTION_URL: 'https://abc.lambda-url.ap-southeast-2.on.aws/' };
+  assert.strictEqual(collectionUrl(env), 'https://abc.lambda-url.ap-southeast-2.on.aws/');
+});
+
+test('Unit: collectionUrl returns undefined when neither variable is set (existing behaviour unchanged)', async (t) => {
+  assert.strictEqual(collectionUrl({}), undefined);
 });
 
 test('Scenario: Missing Entra configuration is reported - GET /admin/config.json returns 500', async (t) => {
