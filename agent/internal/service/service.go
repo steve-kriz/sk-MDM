@@ -202,6 +202,25 @@ func Run(ctx context.Context, hooks Hooks) error {
 	}
 }
 
+// Restart asks the platform's service manager to stop the agent and start it
+// again. It is what a self-update invokes once the new binary is in place, so
+// the build that is running becomes the build that was just installed.
+//
+// It is a request, not a sequence this process sees through: the process making
+// it is the one being stopped, so everything after the stop belongs to the
+// service manager. On macOS that is launchd, which is asked to kick the job
+// over; on Windows it is the service control manager, which is asked to stop
+// the service and start it again.
+func Restart(ctx context.Context, cfg Config) error {
+	if cfg.Runner == nil {
+		return errors.New("service: no command runner")
+	}
+	if cfg.goos() == "windows" {
+		return restartWindows(ctx, cfg)
+	}
+	return restartDarwin(ctx, cfg)
+}
+
 // fire runs the hook a request asks for, once. A shutdown with no hook of its
 // own is the stop path: the machine is going down, so the agent stops.
 func (h Hooks) fire(request Request) {

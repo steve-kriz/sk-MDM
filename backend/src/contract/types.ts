@@ -106,6 +106,11 @@ export interface CheckInRequest {
   inventory: Inventory;
   posture: Posture;
   /**
+   * The agent build posting this check-in. Absent from an older agent, which
+   * is why the backend falls back to the version stored on the device profile.
+   */
+  agentVersion?: string;
+  /**
    * Compliance the agent evaluated locally against the policies it last pulled.
    * Absent entirely when the agent has nothing to report; `violations` is an
    * empty array (never absent) on a compliant entry.
@@ -120,16 +125,35 @@ export interface CheckInRequest {
 }
 
 /**
+ * The agent build a device is being moved to.
+ *
+ * The agent downloads `url`, refuses the bytes whose SHA-256 is not `sha256`,
+ * and swaps itself for them.
+ */
+export interface AgentRelease {
+  /** The published version, `major.minor.patch`. */
+  version: string;
+  /** Where the build is downloaded from. Always `https`. */
+  url: string;
+  /** SHA-256 of the build, lower-case hex. */
+  sha256: string;
+}
+
+/**
  * Response to `POST /api/v1/devices/{deviceId}/checkin`.
  *
- * The key set is exactly these two. No policy information is carried here: a
- * device's policies come from `GET /api/v1/devices/{deviceId}/policies`.
+ * The key set is exactly the two required keys, plus `agentRelease` when -- and
+ * only when -- a newer build is published for the device's platform. No policy
+ * information is carried here: a device's policies come from
+ * `GET /api/v1/devices/{deviceId}/policies`.
  */
 export interface CheckInResponse {
   /** How long the agent should wait before the next check-in. */
   checkInIntervalSeconds: number;
   /** Commands waiting to be leased, so the agent can skip an empty poll. */
   pendingCommandCount: number;
+  /** The build to update to. Absent when the device is already on the published one. */
+  agentRelease?: AgentRelease;
 }
 
 /**

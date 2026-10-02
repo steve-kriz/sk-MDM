@@ -133,6 +133,36 @@ export function audit(dayUtc: string, seq: string | number): TableKey {
 }
 
 /**
+ * The platforms an agent build is published for: the GOOS/GOARCH pairs the
+ * agent is cross-compiled to, spelled the way the release record names them.
+ */
+export const AGENT_RELEASE_PLATFORMS = [
+  'windows-amd64',
+  'windows-arm64',
+  'darwin-amd64',
+  'darwin-arm64',
+] as const;
+
+/** One of the four platforms an agent release may be published for. */
+export type AgentReleasePlatform = (typeof AGENT_RELEASE_PLATFORMS)[number];
+
+/**
+ * `AGENTRELEASE` / `<platform>` -- the agent build the fleet is being moved to
+ * on one platform.
+ *
+ * One item per platform, in one partition, so a check-in reads the build for
+ * the device's platform with a single get. A platform outside the published
+ * set is rejected the way every other id is, rather than writing a release
+ * nothing will ever look for.
+ */
+export function agentRelease(platform: string): TableKey {
+  if (!AGENT_RELEASE_PLATFORMS.includes(platform as AgentReleasePlatform)) {
+    throw new Error(`invalid id: ${String(platform)}`);
+  }
+  return { pk: 'AGENTRELEASE', sk: platform };
+}
+
+/**
  * Index attributes putting a device into the `gsi1` device list, sorted by
  * the ISO-8601 instant it was last seen.
  */

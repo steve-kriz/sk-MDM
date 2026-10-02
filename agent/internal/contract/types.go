@@ -130,24 +130,38 @@ type PolicyComplianceEntry struct {
 
 // CheckInRequest is the body of POST /api/v1/devices/{deviceId}/checkin.
 //
-// PolicyCompliance is omitempty: a check-in that reports nothing marshals
-// without a "policyCompliance" key.
+// PolicyCompliance and AgentVersion are omitempty: a check-in that reports
+// nothing marshals without a "policyCompliance" key, and an agent that does not
+// name its build marshals without an "agentVersion" one.
 type CheckInRequest struct {
 	CollectedAt      string                  `json:"collectedAt"` // ISO-8601 UTC
 	Inventory        Inventory               `json:"inventory"`
 	Posture          Posture                 `json:"posture"`
+	AgentVersion     string                  `json:"agentVersion,omitempty"`
 	PolicyCompliance []PolicyComplianceEntry `json:"policyCompliance,omitempty"`
+}
+
+// AgentRelease is the agent build a device is being moved to: the agent
+// downloads URL, refuses the bytes whose SHA-256 is not SHA256, and swaps
+// itself for them.
+type AgentRelease struct {
+	Version string `json:"version"` // major.minor.patch
+	URL     string `json:"url"`     // always https
+	SHA256  string `json:"sha256"`  // lower-case hex
 }
 
 // CheckInResponse is the body of a successful check-in.
 //
-// The key set is exactly these two: how long the agent waits before the next
-// check-in, and whether a command poll would find work. No policy information
-// is carried here -- a device's policies come from
-// GET /api/v1/devices/{deviceId}/policies.
+// The key set is exactly the two required keys -- how long the agent waits
+// before the next check-in, and whether a command poll would find work -- plus
+// AgentRelease when, and only when, a newer build is published for this
+// device's platform. It is a pointer so "no update" is told from an update to
+// an empty build. No policy information is carried here -- a device's policies
+// come from GET /api/v1/devices/{deviceId}/policies.
 type CheckInResponse struct {
-	CheckInIntervalSeconds int `json:"checkInIntervalSeconds"`
-	PendingCommandCount    int `json:"pendingCommandCount"`
+	CheckInIntervalSeconds int           `json:"checkInIntervalSeconds"`
+	PendingCommandCount    int           `json:"pendingCommandCount"`
+	AgentRelease           *AgentRelease `json:"agentRelease,omitempty"`
 }
 
 // Command is one command leased to the device. Payload is left as raw JSON:

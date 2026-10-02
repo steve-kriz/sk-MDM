@@ -23,6 +23,7 @@ import (
 	"github.com/officehq/sk-mdm/agent/internal/scheduler"
 	"github.com/officehq/sk-mdm/agent/internal/service"
 	"github.com/officehq/sk-mdm/agent/internal/state"
+	"github.com/officehq/sk-mdm/agent/internal/update"
 	"github.com/officehq/sk-mdm/agent/internal/version"
 )
 
@@ -98,14 +99,21 @@ type agentEnv struct {
 
 	// Hostname is the machine name sent at enrollment.
 	Hostname string
+
+	// BinaryPath is this executable: the file a self-update replaces. Empty
+	// means the agent cannot update itself, and an advertised release is
+	// left alone.
+	BinaryPath string
 }
 
 // agent is the assembled agent: the dependencies one check-in cycle runs from,
-// and the logger the service hooks report through.
+// the logger the service hooks report through, and the self-update the process
+// settles before the loop starts.
 type agent struct {
-	deps   *scheduler.Deps
-	logger *logging.Logger
-	clock  platform.Clock
+	deps    *scheduler.Deps
+	logger  *logging.Logger
+	clock   platform.Clock
+	updates *update.Deps
 }
 
 // newAgent assembles the production agent: the config and the state the
@@ -142,6 +150,28 @@ func newAgent(env agentEnv) (*agent, error) {
 		GOOS:   env.GOOS,
 		Client: transport,
 		Store:  executor.NewStore(env.FS, executor.StorePath(env.GOOS)),
+	}
+
+	// The self-update: how a replaced binary is installed, and the restart
+	// that makes it the one running. It is wired only when this executable's
+	// path is known, because an update with nothing to replace is one that
+	// would leave the agent in two minds about which binary is current.
+	var updates *update.Deps
+	if env.BinaryPath != "" {
+		updates = &update.Deps{
+			FS:     env.FS,
+			Doer:   env.Doer,
+			Logger: logger.With("update"),
+			Path:   env.BinaryPath,
+			Restart: func(ctx context.Context) error {
+				return service.Restart(ctx, service.Config{
+					FS:         env.FS,
+					Runner:     env.Runner,
+					GOOS:       env.GOOS,
+					BinaryPath: env.BinaryPath,
+				})
+			},
+		}
 	}
 
 	deps := &scheduler.Deps{
@@ -183,7 +213,29 @@ func newAgent(env agentEnv) (*agent, error) {
 		return executor.Poll(ctx, commands)
 	}
 
-	return &agent{deps: deps, logger: logger, clock: env.Clock}, nil
+	if updates != nil {
+		deps.ApplyUpdate = func(ctx context.Context, rel contract.AgentRelease) error {
+			return update.Apply(ctx, rel, updates)
+		}
+	}
+
+	return &agent{deps: deps, logger: logger, clock: env.Clock, updates: updates}, nil
+}
+
+// settleUpdate finishes whatever the previous process started: an update that
+// is running is confirmed and its leftovers cleared, and one that is not is
+// rolled back onto the binary it replaced.
+//
+// It runs once, before the scheduler, because the question it answers is "is
+// the build that just started the build that was installed" and nothing else
+// may happen until it is settled.
+func (a *agent) settleUpdate() {
+	if a.updates == nil {
+		return
+	}
+	if err := update.RollbackIfUnhealthy(a.updates); err != nil {
+		a.log("update could not be settled: " + err.Error())
+	}
 }
 
 // hooks is the agent as the service state machine drives it: the scheduler loop
@@ -238,6 +290,13 @@ func runAgent(fsys platform.FileSystem, goos string, args []string, stdout, stde
 		name = ""
 	}
 
+	// A host that will not say where this executable is is still manageable;
+	// it just cannot replace itself.
+	binary, err := executablePath()
+	if err != nil {
+		binary = ""
+	}
+
 	agent, err := newAgent(agentEnv{
 		FS:         fsys,
 		Runner:     newRunner(),
@@ -247,6 +306,7 @@ func runAgent(fsys platform.FileSystem, goos string, args []string, stdout, stde
 		ConfigPath: *configPath,
 		StatePath:  *statePath,
 		Hostname:   name,
+		BinaryPath: binary,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -255,6 +315,10 @@ func runAgent(fsys platform.FileSystem, goos string, args []string, stdout, stde
 		}
 		return exitError
 	}
+
+	// Settle the previous process's update before anything else runs, so the
+	// loop that starts is the one this build was meant to be.
+	agent.settleUpdate()
 
 	hooks := agent.hooks()
 

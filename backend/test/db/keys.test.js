@@ -21,6 +21,8 @@ import {
   audit,
   deviceListIndex,
   groupIndex,
+  agentRelease,
+  AGENT_RELEASE_PLATFORMS,
   KEY_SEPARATOR,
   GSI1_NAME,
 } from '../../dist/db/keys.js';
@@ -198,4 +200,115 @@ test('E2E Scenario: Hardware pointer key shape and validation', () => {
       return true;
     }
   );
+});
+
+// ============================================================================
+// TASK-022: Agent Release Key Builder Tests
+// ============================================================================
+
+test('Unit: agentRelease builds the correct key for windows-amd64', () => {
+  const key = agentRelease('windows-amd64');
+  assert.deepStrictEqual(key, { pk: 'AGENTRELEASE', sk: 'windows-amd64' });
+});
+
+test('Unit: agentRelease builds the correct key for windows-arm64', () => {
+  const key = agentRelease('windows-arm64');
+  assert.deepStrictEqual(key, { pk: 'AGENTRELEASE', sk: 'windows-arm64' });
+});
+
+test('Unit: agentRelease builds the correct key for darwin-amd64', () => {
+  const key = agentRelease('darwin-amd64');
+  assert.deepStrictEqual(key, { pk: 'AGENTRELEASE', sk: 'darwin-amd64' });
+});
+
+test('Unit: agentRelease builds the correct key for darwin-arm64', () => {
+  const key = agentRelease('darwin-arm64');
+  assert.deepStrictEqual(key, { pk: 'AGENTRELEASE', sk: 'darwin-arm64' });
+});
+
+test('Unit: agentRelease rejects invalid platform linux-amd64', () => {
+  assert.throws(
+    () => agentRelease('linux-amd64'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: linux-amd64');
+      return true;
+    }
+  );
+});
+
+test('Unit: agentRelease rejects invalid platform windows-ppc64', () => {
+  assert.throws(
+    () => agentRelease('windows-ppc64'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: windows-ppc64');
+      return true;
+    }
+  );
+});
+
+test('Unit: agentRelease rejects invalid platform darwin-x86', () => {
+  assert.throws(
+    () => agentRelease('darwin-x86'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: darwin-x86');
+      return true;
+    }
+  );
+});
+
+test('Unit: agentRelease rejects invalid platform with separator', () => {
+  assert.throws(
+    () => agentRelease('windows#amd64'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: windows#amd64');
+      return true;
+    }
+  );
+});
+
+test('Unit: AGENT_RELEASE_PLATFORMS contains exactly four platforms', () => {
+  assert.strictEqual(AGENT_RELEASE_PLATFORMS.length, 4);
+  assert(AGENT_RELEASE_PLATFORMS.includes('windows-amd64'));
+  assert(AGENT_RELEASE_PLATFORMS.includes('windows-arm64'));
+  assert(AGENT_RELEASE_PLATFORMS.includes('darwin-amd64'));
+  assert(AGENT_RELEASE_PLATFORMS.includes('darwin-arm64'));
+});
+
+test('Unit: agentRelease uses AGENTRELEASE partition for all platforms', () => {
+  for (const platform of AGENT_RELEASE_PLATFORMS) {
+    const key = agentRelease(platform);
+    assert.strictEqual(key.pk, 'AGENTRELEASE');
+    assert.strictEqual(key.sk, platform);
+  }
+});
+
+test('E2E Scenario: All four release platforms are buildable', () => {
+  const platforms = ['windows-amd64', 'windows-arm64', 'darwin-amd64', 'darwin-arm64'];
+
+  for (const platform of platforms) {
+    const key = agentRelease(platform);
+    assert.strictEqual(key.pk, 'AGENTRELEASE');
+    assert.strictEqual(key.sk, platform);
+  }
+});
+
+test('E2E Scenario: Release platform rejection follows TASK-004 convention', () => {
+  // Invalid platforms should throw with "invalid id: <value>" message
+  const invalidPlatforms = [
+    'linux-amd64',
+    'freebsd-amd64',
+    'android-arm64',
+    'ios-arm64',
+    '',
+    'windows',
+    'darwin',
+  ];
+
+  for (const platform of invalidPlatforms) {
+    assert.throws(
+      () => agentRelease(platform),
+      (err) => err.message === `invalid id: ${platform}`,
+      `Platform ${platform} should throw with correct message`,
+    );
+  }
 });

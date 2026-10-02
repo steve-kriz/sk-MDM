@@ -285,14 +285,48 @@ test('Absent compliance is omitted from the wire', async (t) => {
   assert.ok(!('policyCompliance' in msgNoCompliance), 'policyCompliance key should be absent when not reported');
 });
 
+test('Check-in request with agent version is valid', async (t) => {
+  // Load check-in request with agent version
+  const versionPath = join(messagesDir, 'checkin-request-with-agent-version.json');
+  const msgWithVersion = JSON.parse(readFileSync(versionPath, 'utf-8'));
+
+  // When checking the message
+  // Then agentVersion should be present as top-level field
+  assert.ok('agentVersion' in msgWithVersion, 'agentVersion should be present');
+  assert.strictEqual(typeof msgWithVersion.agentVersion, 'string', 'agentVersion should be a string');
+  assert.ok(msgWithVersion.agentVersion.length > 0, 'agentVersion should not be empty');
+});
+
+test('Check-in response with agent release is valid', async (t) => {
+  // Load check-in response with agent release
+  const releasePath = join(messagesDir, 'checkin-response-with-release.json');
+  const msgWithRelease = JSON.parse(readFileSync(releasePath, 'utf-8'));
+
+  // When checking the message
+  // Then checkInIntervalSeconds and pendingCommandCount should be present
+  assert.ok('checkInIntervalSeconds' in msgWithRelease, 'checkInIntervalSeconds should be present');
+  assert.ok('pendingCommandCount' in msgWithRelease, 'pendingCommandCount should be present');
+
+  // And agentRelease should be present with required fields
+  assert.ok('agentRelease' in msgWithRelease, 'agentRelease should be present');
+  const agentRelease = msgWithRelease.agentRelease;
+  assert.ok(agentRelease.version, 'agentRelease should have version');
+  assert.ok(agentRelease.url, 'agentRelease should have url');
+  assert.ok(agentRelease.sha256, 'agentRelease should have sha256');
+  assert.strictEqual(agentRelease.url.substring(0, 8), 'https://', 'agentRelease url should be https');
+});
+
 test('Golden messages round-trip in both languages', async (t) => {
   // Given the message files
   const messageFiles = [
     'checkin-request.json',
     'checkin-request-no-warnings.json',
     'checkin-request-with-compliance.json',
+    'checkin-request-with-agent-version.json',
     'policy-bundle-response.json',
-    'policy-bundle-response-no-conflicts.json'
+    'policy-bundle-response-no-conflicts.json',
+    'checkin-response.json',
+    'checkin-response-with-release.json'
   ];
 
   // When the Node test inspects their keys
@@ -302,10 +336,15 @@ test('Golden messages round-trip in both languages', async (t) => {
 
     // Then each object's key set equals the documented field names
     // (i.e., no extra fields, no missing fields)
-    if (file.includes('checkin')) {
+    if (file.includes('checkin-request')) {
+      // CheckInRequest fields
       assert.ok('collectedAt' in msg, `${file} should have collectedAt`);
       assert.ok('inventory' in msg, `${file} should have inventory`);
       assert.ok('posture' in msg, `${file} should have posture`);
+    } else if (file.includes('checkin-response')) {
+      // CheckInResponse fields
+      assert.ok('checkInIntervalSeconds' in msg, `${file} should have checkInIntervalSeconds`);
+      assert.ok('pendingCommandCount' in msg, `${file} should have pendingCommandCount`);
     } else if (file.includes('policy')) {
       assert.ok('deviceId' in msg, `${file} should have deviceId`);
       assert.ok('generatedAt' in msg, `${file} should have generatedAt`);

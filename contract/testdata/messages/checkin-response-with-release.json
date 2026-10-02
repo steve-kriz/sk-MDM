@@ -1,0 +1,9 @@
+{
+  "checkInIntervalSeconds": 900,
+  "pendingCommandCount": 2,
+  "agentRelease": {
+    "version": "1.3.0",
+    "url": "https://releases.example.com/mdmagent/1.3.0/windows-amd64/mdmagent.exe",
+    "sha256": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+  }
+}

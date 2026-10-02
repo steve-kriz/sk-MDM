@@ -41,6 +41,7 @@ import (
 	"github.com/officehq/sk-mdm/agent/internal/policy"
 	"github.com/officehq/sk-mdm/agent/internal/posture"
 	"github.com/officehq/sk-mdm/agent/internal/state"
+	"github.com/officehq/sk-mdm/agent/internal/version"
 )
 
 // Spool directory locations, beside the config and state files the installer
@@ -143,6 +144,14 @@ type Deps struct {
 	// Evaluate overrides policy.Evaluate. It is called once per cycle, and
 	// not at all when the policy bundle could not be fetched.
 	Evaluate func(bundle contract.PolicyBundleResponse, posture contract.Posture, now time.Time) []policy.Result
+
+	// ApplyUpdate, when non-nil, is called with the release a check-in
+	// advertised, at most once per cycle and only when one was advertised.
+	// It is the seam agent/internal/update plugs into: the call replaces
+	// this binary and restarts the service, so it is the last thing a cycle
+	// may get to. An error it returns costs one warning line and nothing
+	// else -- a failed update is retried by the next cycle, not by this one.
+	ApplyUpdate func(ctx context.Context, rel contract.AgentRelease) error
 
 	// AfterCheckIn, when non-nil, is called with the decoded check-in
 	// response at the end of a successful cycle. It is the seam the command
@@ -248,6 +257,9 @@ func runCycle(ctx context.Context, deps *Deps) error {
 		CollectedAt: deps.Clock.Now().UTC().Format(time.RFC3339),
 		Inventory:   inv,
 		Posture:     pst,
+		// What this agent is running, so the backend advertises a new build
+		// only to the devices that are not on it yet.
+		AgentVersion: version.Version,
 	}
 	if bundle, ok := deps.fetchBundle(deviceID); ok {
 		req.PolicyCompliance = policy.Entries(deps.evaluate(bundle, pst, deps.Clock.Now()))
@@ -438,10 +450,35 @@ func (d *Deps) postCheckIn(ctx context.Context, path string, body []byte) error 
 		logging.F("pendingCommandCount", out.PendingCommandCount),
 	)
 
+	// The update comes before the command poll: applying one restarts the
+	// agent, and a command leased now would be interrupted by that restart.
+	d.applyUpdate(ctx, out.AgentRelease)
+
 	if d.AfterCheckIn != nil {
 		return d.AfterCheckIn(ctx, out)
 	}
 	return nil
+}
+
+// applyUpdate installs the build a check-in advertised, once.
+//
+// It is the only call site, and it is reached once per cycle, so an update is
+// attempted at most once however the attempt goes. A failure is logged and the
+// cycle carries on: the release is still published, so the next check-in
+// advertises it again, and an agent that cannot update itself must still check
+// in, report its inventory and run its commands.
+func (d *Deps) applyUpdate(ctx context.Context, rel *contract.AgentRelease) {
+	if rel == nil || d.ApplyUpdate == nil {
+		return
+	}
+
+	d.log(logging.LevelInfo, "agent update advertised", logging.F("version", rel.Version))
+	if err := d.ApplyUpdate(ctx, *rel); err != nil {
+		d.log(logging.LevelWarn, "agent update failed",
+			logging.F("version", rel.Version),
+			logging.F("error", err.Error()),
+		)
+	}
 }
 
 // clearCredential discards a device identity the backend has rejected, so the
