@@ -4,6 +4,8 @@
  * This module owns the single application router; later tickets register their
  * routes on the exported `router` and need no change here.
  */
+import { registerDeviceRoutes } from './admin/devices.js';
+import { registerAuditRoutes, resolveAdminDependencies } from './admin/router.js';
 import { createRouter, type Router, type RouterRequest, type RouterResponse } from './http/router.js';
 import { registerCheckInRoute, resolveCheckInDependencies } from './routes/checkin.js';
 import { registerCommandRoutes, type CommandRouteDeps } from './routes/commands.js';
@@ -77,6 +79,64 @@ export {
 } from './routes/checkin.js';
 export type { CheckInDependencies, CheckInTable } from './routes/checkin.js';
 // --- end TASK-007 ----------------------------------------------------------
+
+// --- TASK-010: GET /admin/api/v1/* ------------------------------------------
+// The admin read surface, every route behind the Entra token verifier. Its
+// dependencies -- the verifier, the table client and the clock -- are resolved
+// on each request, so nothing is constructed at import time; start-up calls
+// `configureAdminRoutes({ verifier, table, now })` before the first request.
+// A later admin route registers itself the same way, with
+// `registerAdminRoute(router, method, subPath, handler, resolveAdminDependencies)`.
+registerDeviceRoutes(router, resolveAdminDependencies);
+registerAuditRoutes(router, resolveAdminDependencies);
+export {
+  DEVICE_DETAIL_PATH,
+  DEVICE_LIST_PATH,
+  DEVICE_SUMMARY_FIELDS,
+  MAX_DETAIL_COMMANDS,
+  STALE_AFTER_MILLIS,
+  UNKNOWN_COMPLIANCE,
+  deviceSummary,
+  handleDeviceDetail,
+  handleDeviceList,
+  registerDeviceRoutes,
+} from './admin/devices.js';
+export {
+  ADMIN_PREFIX,
+  AUDIT_PATH,
+  BEARER_PREFIX,
+  DEFAULT_LIMIT,
+  MAX_LIMIT,
+  adminPath,
+  configureAdminRoutes,
+  handleAuditQuery,
+  parseLimit,
+  registerAdminRoute,
+  registerAuditRoutes,
+  requireAdmin,
+  resolveAdminDependencies,
+} from './admin/router.js';
+export type {
+  AdminClock,
+  AdminDependencies,
+  AdminDependencySource,
+  AdminRequest,
+  AdminRouteHandler,
+  AdminTable,
+} from './admin/router.js';
+export {
+  AUDIT_DEFAULT_LIMIT,
+  AUDIT_MAX_DAYS_PER_PAGE,
+  AUDIT_MAX_LIMIT,
+  SEQ_PATTERN,
+  appendAudit,
+  auditSeq,
+  isoUtc,
+  queryAudit,
+  utcDay,
+} from './audit.js';
+export type { AuditPage, AuditQuery, AuditQueryTable } from './audit.js';
+// --- end TASK-010 ----------------------------------------------------------
 
 function parseQuery(rawQueryString: string | undefined): Record<string, string> {
   const query: Record<string, string> = {};
