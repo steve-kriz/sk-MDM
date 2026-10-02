@@ -4,7 +4,10 @@
  * This module owns the single application router; later tickets register their
  * routes on the exported `router` and need no change here.
  */
+import { registerCommandDispatchRoutes } from './admin/commandDispatch.js';
 import { registerDeviceRoutes } from './admin/devices.js';
+import { registerEnrollmentTokenRoutes } from './admin/enrollmentTokens.js';
+import { registerGroupRoutes } from './admin/groups.js';
 import { registerAuditRoutes, resolveAdminDependencies } from './admin/router.js';
 import { createRouter, type Router, type RouterRequest, type RouterResponse } from './http/router.js';
 import { registerCheckInRoute, resolveCheckInDependencies } from './routes/checkin.js';
@@ -137,6 +140,62 @@ export {
 } from './audit.js';
 export type { AuditPage, AuditQuery, AuditQueryTable } from './audit.js';
 // --- end TASK-010 ----------------------------------------------------------
+
+// --- TASK-011: POST /admin/api/v1/* -----------------------------------------
+// The admin write surface -- groups, enrollment tokens and command dispatch --
+// registered behind the same token verifier and resolving the same injected
+// dependencies as the read routes, so start-up still configures everything with
+// one `configureAdminRoutes({ verifier, table, now, randomBytes })` call.
+registerGroupRoutes(router, resolveAdminDependencies);
+registerEnrollmentTokenRoutes(router, resolveAdminDependencies);
+registerCommandDispatchRoutes(router, resolveAdminDependencies);
+export {
+  GROUP_CREATED_ACTION,
+  GROUP_ID_PREFIX,
+  GROUP_MEMBERS_ADDED_ACTION,
+  GROUP_MEMBERS_PATH,
+  GROUP_PATH,
+  GROUP_SUMMARY_FIELDS,
+  groupSummary,
+  handleGroupCreate,
+  handleGroupList,
+  handleGroupMembersAdd,
+  readGroupMemberIds,
+  registerGroupRoutes,
+} from './admin/groups.js';
+export {
+  ENROLLMENT_TOKEN_CREATED_ACTION,
+  ENROLLMENT_TOKEN_PATH,
+  TOKEN_ID_BYTES,
+  TOKEN_SECRET_BYTES,
+  TOKEN_SEPARATOR,
+  handleEnrollmentTokenCreate,
+  registerEnrollmentTokenRoutes,
+} from './admin/enrollmentTokens.js';
+export {
+  COMMAND_ID_PREFIX,
+  COMMAND_QUEUED_ACTION,
+  COMMAND_TTL_MILLIS,
+  COMMAND_TYPES,
+  CONFIRM_REQUIRED_TYPES,
+  DEVICE_COMMAND_PATH,
+  GROUP_COMMAND_PATH,
+  SCRIPT_INTERPRETERS,
+  handleDeviceCommandCreate,
+  handleGroupCommandCreate,
+  offendingPayloadFields,
+  registerCommandDispatchRoutes,
+} from './admin/commandDispatch.js';
+export {
+  adminActor,
+  adminNow,
+  adminRandomBytes,
+  adminWriteTable,
+  readJsonBody,
+  toAdminDate,
+} from './admin/router.js';
+export type { AdminRandomBytes, AdminWriteTable } from './admin/router.js';
+// --- end TASK-011 ----------------------------------------------------------
 
 function parseQuery(rawQueryString: string | undefined): Record<string, string> {
   const query: Record<string, string> = {};

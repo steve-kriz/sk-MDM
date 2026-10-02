@@ -27,7 +27,13 @@
  * `limit` rules (default 50, maximum 200, decimal integers only) and the
  * `{items, cursor}` envelope, plus the audit range route, whose query side
  * lives in `src/audit.ts` next to the writer it shares a key shape with.
+ *
+ * The write routes (`src/admin/groups.ts`, `src/admin/enrollmentTokens.ts`,
+ * `src/admin/commandDispatch.ts`) share what they need from here too: the
+ * JSON body reader, the clock and random source, the audit actor, and the
+ * `AdminWriteTable` narrowing that keeps `put` out of the read-only contract.
  */
+import { randomBytes as cryptoRandomBytes } from 'node:crypto';
 import { isVerifyFailure, type TokenClaims, type TokenVerifier } from '../auth/entra.js';
 import { queryAudit, type AuditPage } from '../audit.js';
 import type { TableKey } from '../db/keys.js';
@@ -65,6 +71,18 @@ export interface AdminTable {
 }
 
 /**
+ * What a write route additionally needs. The read routes are unchanged, so a
+ * read-only fake still satisfies `AdminTable`; a write route narrows the
+ * injected table with `adminWriteTable` instead.
+ */
+export interface AdminWriteTable extends AdminTable {
+  put(item: Item, fields?: RequestFields): Promise<void>;
+}
+
+/** The injected random source, injectable so a test can make ids predictable. */
+export type AdminRandomBytes = (size: number) => Buffer;
+
+/**
  * Current time: integer epoch *seconds*, or any instant a `Date` can be built
  * from (an ISO-8601 string or a `Date`). Same unit as the agent routes' clock.
  */
@@ -77,6 +95,8 @@ export interface AdminDependencies {
   table: AdminTable;
   /** Current time. Defaults to the system clock, in epoch seconds. */
   now?: AdminClock;
+  /** Random source used by the write routes. Defaults to `node:crypto`. */
+  randomBytes?: AdminRandomBytes;
 }
 
 /** Dependencies, or something that resolves them when the request arrives. */
@@ -98,6 +118,74 @@ export type AdminRouteHandler = (
 /** A JSON error body, in the shape every route in this backend returns. */
 export function jsonError(statusCode: number, error: string, extra?: Record<string, unknown>): RouteResult {
   return { statusCode, body: { error, ...(extra ?? {}) } };
+}
+
+/**
+ * The injected table as a write route needs it.
+ *
+ * Writing is not part of `AdminTable`, so the one place that assumption is
+ * made is here: a table client with no `put` is a wiring fault and becomes the
+ * router's 500 rather than a silently skipped write.
+ */
+export function adminWriteTable(table: AdminTable): AdminWriteTable {
+  if (typeof (table as Partial<AdminWriteTable>).put !== 'function') {
+    throw new Error('admin write routes need a table client with put()');
+  }
+  return table as AdminWriteTable;
+}
+
+/** Normalise whatever the injected clock returned into a `Date`; a number is epoch seconds. */
+export function toAdminDate(instant: number | string | Date): Date {
+  if (instant instanceof Date) {
+    return new Date(instant.getTime());
+  }
+  if (typeof instant === 'string') {
+    return new Date(instant);
+  }
+  return new Date(instant * 1000);
+}
+
+/** The current instant, from the injected clock or the system one. */
+export function adminNow(deps: AdminDependencies): Date {
+  const clock = deps.now ?? ((): number => Math.floor(Date.now() / 1000));
+  return toAdminDate(clock());
+}
+
+/** The injected random source, or `node:crypto`'s. */
+export function adminRandomBytes(deps: AdminDependencies): AdminRandomBytes {
+  return deps.randomBytes ?? cryptoRandomBytes;
+}
+
+/**
+ * Who the audit trail records for this request: the admin's
+ * `preferred_username`, falling back to the other identity claims a tenant may
+ * issue instead so an entry is never written without an actor.
+ */
+export function adminActor(claims: TokenClaims | undefined): string {
+  for (const claim of ['preferred_username', 'upn', 'email', 'sub']) {
+    const value = claims?.[claim];
+    if (typeof value === 'string' && value.length > 0) {
+      return value;
+    }
+  }
+  return 'unknown';
+}
+
+/** The posted body as an object; `null` when it is absent or not JSON object text. */
+export function readJsonBody(body: string | null | undefined): Record<string, unknown> | null {
+  if (typeof body !== 'string' || body.length === 0) {
+    return null;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    return null;
+  }
+  return parsed as Record<string, unknown>;
 }
 
 /** The full path a sub-path is mounted on; an already-prefixed path is left alone. */
