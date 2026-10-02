@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Windows installer for the SK-MDM agent.
+
+  The package takes the two values an unattended install needs as public,
+  secured properties, so a deployment tool can pass them on the command line:
+
+    msiexec /i OfficeHQ-MDM-1.2.3-x64.msi /qn ^
+      COLLECTIONURL=https://mdm.example.com ENROLLTOKEN=<token>
+
+  mdmagent.exe lands in [ProgramFiles64Folder]OfficeHQ\MDM\, the config file
+  the agent reads (agent/internal/config) is written to
+  C:\ProgramData\OfficeHQ\MDM\config.json after the files are laid down and
+  before the service is started, and the service, the config and the data
+  directory all go away again on uninstall.
+
+  Built by installers/windows/build-plan.mjs, which supplies the Version and
+  AgentBinary preprocessor variables.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="OfficeHQ MDM Agent"
+    Manufacturer="OfficeHQ"
+    Version="$(var.Version)"
+    UpgradeCode="6C2E8B1D-4F3A-4C58-9E21-7A0D5B4C9F12"
+    Scope="perMachine"
+    Compressed="yes"
+    InstallerVersion="500">
+
+    <SummaryInformation Description="OfficeHQ MDM device agent" />
+
+    <!-- Same-version upgrades are allowed so a rebuilt package of the same
+         version replaces the installed one instead of erroring. -->
+    <MajorUpgrade
+      AllowSameVersionUpgrades="yes"
+      DowngradeErrorMessage="A newer version of [ProductName] is already installed. Uninstall it before installing this version." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Secure="yes" lets the values survive the switch to the elevated
+         server-side install, which is where the config file is written. -->
+    <Property Id="COLLECTIONURL" Secure="yes" />
+    <Property Id="ENROLLTOKEN" Secure="yes" />
+
+    <!-- The agent cannot do anything without a collection URL, so an install
+         that omits it is refused before any file is copied. -->
+    <Launch
+      Condition="COLLECTIONURL &lt;&gt; &quot;&quot;"
+      Message="COLLECTIONURL is required" />
+
+    <!-- [ProgramFiles64Folder]OfficeHQ\MDM\ -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="CompanyFolder" Name="OfficeHQ">
+        <Directory Id="INSTALLFOLDER" Name="MDM" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- C:\ProgramData\OfficeHQ\MDM\ -->
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DataCompanyFolder" Name="OfficeHQ">
+        <Directory Id="DATAFOLDER" Name="MDM" />
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="AgentComponents">
+      <Component Id="AgentExecutable" Directory="INSTALLFOLDER" Guid="3F1B6A47-9D52-4E0B-8C7F-2B5E6D1A4038">
+        <File Id="mdmagent.exe" Name="mdmagent.exe" Source="$(var.AgentBinary)" KeyPath="yes" />
+
+        <!-- `mdmagent run` is the verb the service manager is pointed at
+             (agent/cmd/mdmagent/main.go). -->
+        <ServiceInstall
+          Id="AgentServiceInstall"
+          Name="OfficeHQMDMAgent"
+          DisplayName="OfficeHQ MDM Agent"
+          Description="Reports device state to OfficeHQ MDM and applies policy."
+          Type="ownProcess"
+          Start="auto"
+          Account="LocalSystem"
+          ErrorControl="normal"
+          Arguments="run"
+          Vital="yes" />
+
+        <ServiceControl
+          Id="AgentServiceControl"
+          Name="OfficeHQMDMAgent"
+          Start="install"
+          Stop="both"
+          Remove="uninstall"
+          Wait="yes" />
+      </Component>
+
+      <!-- The data directory is owned by the package so uninstall takes the
+           config file, the agent's runtime files and the folders with it. -->
+      <Component Id="AgentDataDirectory" Directory="DATAFOLDER" Guid="8A4D7E92-5C16-4B3F-A0D8-1E9C2F6B5473">
+        <CreateFolder />
+        <RegistryValue
+          Root="HKLM"
+          Key="SOFTWARE\OfficeHQ\MDM"
+          Name="DataDirectory"
+          Type="string"
+          Value="[DATAFOLDER]"
+          KeyPath="yes" />
+        <RemoveFile Id="RemoveAgentConfig" Name="config.json" On="uninstall" />
+        <RemoveFile Id="RemoveAgentDataFiles" Name="*" On="uninstall" />
+        <RemoveFolder Id="RemoveAgentDataFolder" On="uninstall" />
+        <RemoveFolder Id="RemoveAgentCompanyFolder" Directory="DataCompanyFolder" On="uninstall" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="AgentFeature" Title="OfficeHQ MDM Agent" Level="1">
+      <ComponentGroupRef Id="AgentComponents" />
+    </Feature>
+
+    <!-- The config file carries the enrollment token, so it is written by a
+         deferred action running as the install server: the properties travel
+         across in CustomActionData. The shape written here is the one
+         installers/windows/config-writer.mjs renders and the one
+         agent/internal/config.Load reads. -->
+    <CustomAction
+      Id="SetWriteAgentConfigData"
+      Property="WriteAgentConfig"
+      Value="[DATAFOLDER]|[COLLECTIONURL]|[ENROLLTOKEN]" />
+
+    <CustomAction
+      Id="WriteAgentConfig"
+      Script="jscript"
+      Execute="deferred"
+      Impersonate="no"
+      Return="check">
+      <![CDATA[
+      function jsonString(value) {
+        return '"' + value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"") + '"';
+      }
+
+      var data = Session.Property("CustomActionData");
+      var firstSeparator = data.indexOf("|");
+      var directory = data.substring(0, firstSeparator);
+      var rest = data.substring(firstSeparator + 1);
+      var secondSeparator = rest.indexOf("|");
+      var collectionUrl = rest.substring(0, secondSeparator);
+      var enrollToken = rest.substring(secondSeparator + 1);
+
+      var fso = new ActiveXObject("Scripting.FileSystemObject");
+      if (!fso.FolderExists(directory)) {
+        var parent = fso.GetParentFolderName(directory);
+        if (parent.length > 0 && !fso.FolderExists(parent)) {
+          fso.CreateFolder(parent);
+        }
+        fso.CreateFolder(directory);
+      }
+
+      var lines = [
+        "{",
+        '  "collectionUrl": ' + jsonString(collectionUrl) + ",",
+        '  "enrollmentToken": ' + jsonString(enrollToken) + ",",
+        '  "checkInIntervalSeconds": 900,',
+        '  "logLevel": "info"',
+        "}",
+        ""
+      ];
+
+      var file = fso.CreateTextFile(fso.BuildPath(directory, "config.json"), true);
+      file.Write(lines.join("\r\n"));
+      file.Close();
+      ]]>
+    </CustomAction>
+
+    <InstallExecuteSequence>
+      <Custom Action="SetWriteAgentConfigData" After="InstallFiles" Condition="NOT Installed" />
+      <Custom Action="WriteAgentConfig" Before="StartServices" Condition="NOT Installed" />
+    </InstallExecuteSequence>
+  </Package>
+</Wix>
