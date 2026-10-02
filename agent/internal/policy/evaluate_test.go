@@ -721,3 +721,126 @@ func TestUnit_StringsSettingExtraction(t *testing.T) {
 		t.Errorf("Expected ok=false for missing key")
 	}
 }
+
+// ============================================================================
+// TASK-030: Antivirus Setting Tests
+// ============================================================================
+
+// TestScenario_AntivirusOffViolatesAnAntivirusPolicy covers the setting key,
+// the violation key and both posture outcomes.
+func TestScenario_AntivirusOffViolatesAnAntivirusPolicy(t *testing.T) {
+	if SettingAntivirusEnabled != "antivirusEnabled" {
+		t.Fatalf("SettingAntivirusEnabled = %q, want antivirusEnabled", SettingAntivirusEnabled)
+	}
+	if ViolationAntivirusDisabled != "antivirus_disabled" {
+		t.Fatalf("ViolationAntivirusDisabled = %q, want antivirus_disabled", ViolationAntivirusDisabled)
+	}
+
+	bundle := contract.PolicyBundleResponse{
+		Policies: []contract.Policy{
+			{PolicyID: "av-policy", Version: 1, Settings: map[string]any{SettingAntivirusEnabled: true}},
+		},
+	}
+	now := time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)
+
+	// Given: posture.antivirus.enabled false
+	off := Evaluate(bundle, contract.Posture{Antivirus: contract.Antivirus{Enabled: false}}, now)
+	if len(off) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(off))
+	}
+	if off[0].Compliant {
+		t.Error("expected compliant false when antivirus is off")
+	}
+	found := false
+	for _, v := range off[0].Violations {
+		if v == ViolationAntivirusDisabled {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected violation %s, got %v", ViolationAntivirusDisabled, off[0].Violations)
+	}
+
+	// Given: posture.antivirus.enabled true
+	on := Evaluate(bundle, contract.Posture{Antivirus: contract.Antivirus{Enabled: true}}, now)
+	if len(on) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(on))
+	}
+	if !on[0].Compliant {
+		t.Error("expected compliant true when antivirus is on")
+	}
+	if len(on[0].Violations) != 0 {
+		t.Errorf("expected no violations, got %v", on[0].Violations)
+	}
+}
+
+// TestScenario_PolicyNotRequiringAntivirusNeverReportsViolation covers false,
+// absent and a non-boolean value, whatever posture reports.
+func TestScenario_PolicyNotRequiringAntivirusNeverReportsViolation(t *testing.T) {
+	cases := []struct {
+		name     string
+		settings map[string]any
+	}{
+		{"false", map[string]any{SettingAntivirusEnabled: false}},
+		{"absent", map[string]any{}},
+		{`"true" (a string)`, map[string]any{SettingAntivirusEnabled: "true"}},
+	}
+	now := time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bundle := contract.PolicyBundleResponse{
+				Policies: []contract.Policy{{PolicyID: "p1", Version: 1, Settings: tc.settings}},
+			}
+			results := Evaluate(bundle, contract.Posture{Antivirus: contract.Antivirus{Enabled: false}}, now)
+			for _, v := range results[0].Violations {
+				if v == ViolationAntivirusDisabled {
+					t.Errorf("violations should not contain %s, got %v", ViolationAntivirusDisabled, results[0].Violations)
+				}
+			}
+		})
+	}
+}
+
+// TestScenario_ViolationOrderIncludesAntivirusAfterDiskEncryption covers the
+// exact, full violation order the contract promises.
+func TestScenario_ViolationOrderIncludesAntivirusAfterDiskEncryption(t *testing.T) {
+	policy := contract.Policy{
+		PolicyID: "strict",
+		Version:  1,
+		Settings: map[string]any{
+			SettingFirewallEnabled:        true,
+			SettingDiskEncryptionRequired: true,
+			SettingAntivirusEnabled:       true,
+			SettingOSUpdateMaxAgeDays:     5,
+			SettingLocalAdminAllowlist:    []string{},
+		},
+	}
+	posture := contract.Posture{
+		Firewall:       contract.Firewall{Enabled: false},
+		DiskEncryption: contract.DiskEncryption{Enabled: false},
+		Antivirus:      contract.Antivirus{Enabled: false},
+		OSUpdate:       contract.OSUpdate{LastCheckedAt: "2026-09-20T00:00:00Z"}, // 12 days old
+		LocalAdmins:    []string{"bob"},
+	}
+	now := time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)
+
+	bundle := contract.PolicyBundleResponse{Policies: []contract.Policy{policy}}
+	results := Evaluate(bundle, posture, now)
+
+	want := []string{
+		ViolationFirewallDisabled,
+		ViolationDiskEncryptionMissing,
+		ViolationAntivirusDisabled,
+		ViolationOSUpdateOverdue,
+		ViolationLocalAdminPrefix + "bob",
+	}
+	if len(results[0].Violations) != len(want) {
+		t.Fatalf("violations = %v, want %v", results[0].Violations, want)
+	}
+	for i, v := range want {
+		if results[0].Violations[i] != v {
+			t.Errorf("violations[%d] = %q, want %q", i, results[0].Violations[i], v)
+		}
+	}
+}

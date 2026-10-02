@@ -406,3 +406,87 @@ test('Unknown field is rejected by schema validation', async (t) => {
   const checkInSchema = openapi.components.schemas.CheckInRequest;
   assert.equal(checkInSchema.additionalProperties, false, 'CheckInRequest should forbid additionalProperties');
 });
+
+test('TASK-030: Scenario: Contract documents the redefined antivirus.enabled without a shape change', async (t) => {
+  // Then Posture.antivirus.enabled is documented as true when Defender or any
+  // Security Center registered antivirus is active, or XProtect is present
+  const enabledSchema = openapi.components.schemas.Posture.properties.antivirus.properties.enabled;
+  assert.ok(enabledSchema.description, 'antivirus.enabled should carry a description');
+  assert.match(enabledSchema.description, /Defender/);
+  assert.match(enabledSchema.description, /Security Center/);
+  assert.match(enabledSchema.description, /XProtect/);
+
+  // And the Posture.antivirus properties and required list are unchanged
+  const antivirusSchema = openapi.components.schemas.Posture.properties.antivirus;
+  assert.deepEqual(
+    Object.keys(antivirusSchema.properties).sort(),
+    ['name', 'enabled', 'definitionsAgeDays'].sort(),
+  );
+  assert.deepEqual(
+    [...antivirusSchema.required].sort(),
+    ['name', 'enabled', 'definitionsAgeDays'].sort(),
+  );
+  assert.deepEqual(
+    [...openapi.components.schemas.Posture.required].sort(),
+    ['diskEncryption', 'firewall', 'antivirus', 'osUpdate', 'localAdmins'].sort(),
+  );
+
+  // And the TypeScript contract types carry a doc comment with the same meaning
+  const typesTs = readFileSync(join(__dirname, '../../src/contract/types.ts'), 'utf-8');
+  const antivirusBlock = typesTs.slice(typesTs.indexOf('antivirus: {'), typesTs.indexOf('osUpdate: {'));
+  assert.match(antivirusBlock, /Microsoft Defender/);
+  assert.match(antivirusBlock, /Security Center/);
+  assert.match(antivirusBlock, /XProtect/);
+
+  // And no posture golden file changed shape: checkin-request.json still
+  // round-trips with exactly the unchanged antivirus keys
+  const checkinMsg = JSON.parse(readFileSync(join(messagesDir, 'checkin-request.json'), 'utf-8'));
+  assert.deepEqual(
+    Object.keys(checkinMsg.posture.antivirus).sort(),
+    ['name', 'enabled', 'definitionsAgeDays'].sort(),
+  );
+});
+
+test('TASK-030: Scenario: Contract carries antivirusFindings in all four places', async (t) => {
+  // Given the new golden file
+  const path = join(messagesDir, 'checkin-request-with-antivirus-findings.json');
+  const msg = JSON.parse(readFileSync(path, 'utf-8'));
+
+  // Then it holds at least one finding with exactly the six keys
+  assert.ok(Array.isArray(msg.antivirusFindings), 'should have an antivirusFindings array');
+  assert.ok(msg.antivirusFindings.length >= 1, 'should hold at least one finding');
+
+  const expectedKeys = ['findingId', 'threatName', 'severity', 'detectedAt', 'resources', 'remediated'].sort();
+  for (const finding of msg.antivirusFindings) {
+    assert.deepEqual(Object.keys(finding).sort(), expectedKeys, 'finding should have exactly the six keys');
+  }
+
+  // And openapi.yaml defines AntivirusFinding with additionalProperties false,
+  // all six fields required and the five-value severity enum
+  const schema = openapi.components.schemas.AntivirusFinding;
+  assert.ok(schema, 'AntivirusFinding schema should be defined');
+  assert.equal(schema.additionalProperties, false, 'AntivirusFinding should forbid additionalProperties');
+  assert.deepEqual(
+    [...schema.required].sort(),
+    ['findingId', 'threatName', 'severity', 'detectedAt', 'resources', 'remediated'].sort(),
+    'AntivirusFinding should require all six fields',
+  );
+  assert.deepEqual(
+    [...schema.properties.severity.enum].sort(),
+    ['unknown', 'low', 'moderate', 'high', 'severe'].sort(),
+    'severity enum should hold the five values',
+  );
+
+  // And CheckInRequest.antivirusFindings references that schema
+  const checkInSchema = openapi.components.schemas.CheckInRequest;
+  assert.ok(checkInSchema.properties.antivirusFindings, 'CheckInRequest should carry antivirusFindings');
+  assert.equal(
+    checkInSchema.properties.antivirusFindings.items.$ref,
+    '#/components/schemas/AntivirusFinding',
+    'antivirusFindings items should reference AntivirusFinding',
+  );
+  assert.ok(
+    !checkInSchema.required.includes('antivirusFindings'),
+    'antivirusFindings should be optional on CheckInRequest',
+  );
+});

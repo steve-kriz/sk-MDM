@@ -548,6 +548,64 @@ test('Scenario: POLICY_SETTING_KEYS holds exactly the eight keys', async (t) => 
   assert.deepStrictEqual(POLICY_SETTING_KEYS.sort(), expectedKeys.sort());
 });
 
+// ============================================================================
+// TASK-030: antivirusEnabled Policy Setting Tests
+// ============================================================================
+
+test('Scenario: Admin creates and updates an antivirus policy', async (t) => {
+  const table = new FakeTable();
+  const deps = createDependencies(table);
+
+  // When an admin POSTs /admin/api/v1/policies with {name:"av", settings:{antivirusEnabled:true}}
+  const createRequest = createValidRequest('POST', '/admin/api/v1/policies', {
+    name: 'av',
+    settings: { antivirusEnabled: true },
+  });
+  createRequest.params = {};
+  const createResult = await handlePolicyCreate(createRequest, deps);
+
+  // Then the status is 201 and the stored settings equal {antivirusEnabled:true}
+  assert.strictEqual(createResult.statusCode, 201);
+  const policyId = createResult.body.policyId;
+  const storedAfterCreate = table.getStoredItem(policyKey(policyId));
+  assert.deepStrictEqual(storedAfterCreate.settings, { antivirusEnabled: true });
+
+  // When the admin PUTs settings {antivirusEnabled:false} to that policy
+  const updateRequest = createValidRequest('PUT', `/admin/api/v1/policies/${policyId}`, {
+    settings: { antivirusEnabled: false },
+  });
+  updateRequest.params = { policyId };
+  const updateResult = await handlePolicyUpdate(updateRequest, deps);
+
+  // Then the status is 200, the stored antivirusEnabled is false and version is 2
+  assert.strictEqual(updateResult.statusCode, 200);
+  assert.strictEqual(updateResult.body.version, 2);
+  const storedAfterUpdate = table.getStoredItem(policyKey(policyId));
+  assert.strictEqual(storedAfterUpdate.settings.antivirusEnabled, false);
+  assert.strictEqual(storedAfterUpdate.version, 2);
+});
+
+test('Scenario: Non-boolean antivirusEnabled is refused', async (t) => {
+  const table = new FakeTable();
+  const deps = createDependencies(table);
+
+  // When an admin POSTs /admin/api/v1/policies with settings {antivirusEnabled:"yes"}
+  const createRequest = createValidRequest('POST', '/admin/api/v1/policies', {
+    name: 'av',
+    settings: { antivirusEnabled: 'yes' },
+  });
+  createRequest.params = {};
+  const result = await handlePolicyCreate(createRequest, deps);
+
+  // Then the status is 400, error is invalid_request, fields contains "settings.antivirusEnabled"
+  assert.strictEqual(result.statusCode, 400);
+  assert.strictEqual(result.body.error, 'invalid_request');
+  assert.ok(result.body.fields.includes('settings.antivirusEnabled'));
+
+  // And no policy item is written
+  assert.strictEqual(table.items.size, 0);
+});
+
 test('Scenario: Policy with firewall and domain settings is stored with 201', async (t) => {
   const table = new FakeTable();
   const deps = createDependencies(table);

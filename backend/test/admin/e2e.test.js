@@ -35,6 +35,7 @@ import {
   deviceInventory,
   devicePosture,
   deviceCommand,
+  deviceAntivirusFinding,
   deviceListIndex,
   groupMember,
   audit as auditKey,
@@ -85,7 +86,10 @@ class FakeTable {
         if (item.pk !== pk) continue;
 
         if (KeyConditionExpression.includes('begins_with(#sk')) {
-          const prefix = ExpressionAttributeValues[':memberPrefix'] || ExpressionAttributeValues[':commandPrefix'];
+          const prefix =
+            ExpressionAttributeValues[':memberPrefix'] ||
+            ExpressionAttributeValues[':commandPrefix'] ||
+            ExpressionAttributeValues[':findingPrefix'];
           if (!item.sk.startsWith(prefix)) continue;
         }
       }
@@ -572,6 +576,132 @@ test('Scenario: Command without issuedAt sorts last', async (t) => {
   const body = JSON.parse(response.body);
   assert.strictEqual(body.commands.length, 3);
   assert.strictEqual(body.commands[2].commandId, 'cmd-3');
+});
+
+// ============================================================================
+// Scenario: Admin sees findings on the device detail (TASK-030)
+// ============================================================================
+
+test('Scenario: Admin sees findings on the device detail', async (t) => {
+  const router = createRouter();
+  const table = new FakeTable();
+  const verifier = new StubVerifier();
+
+  registerDeviceRoutes(router, { verifier, table });
+
+  await table.put({
+    pk: 'DEVICE#d1',
+    sk: 'PROFILE',
+    deviceId: 'd1',
+    hostname: 'host-d1',
+    platform: 'windows',
+    osVersion: '11',
+    agentVersion: '1.0',
+  });
+  await table.put({ pk: 'DEVICE#d1', sk: 'INVENTORY' });
+  await table.put({ pk: 'DEVICE#d1', sk: 'POSTURE' });
+
+  // Given d1 has 55 stored findings with distinct detectedAt values, two
+  // sharing the newest detectedAt with findingIds "b" and "a"
+  for (let i = 0; i < 53; i++) {
+    const key = deviceAntivirusFinding('d1', `old-${String(i).padStart(2, '0')}`);
+    await table.put({
+      ...key,
+      deviceId: 'd1',
+      findingId: `old-${String(i).padStart(2, '0')}`,
+      threatName: 'T',
+      severity: 'low',
+      detectedAt: `2026-09-${String(10 + (i % 20)).padStart(2, '0')}T00:00:00Z`,
+      resources: [],
+      remediated: false,
+      firstReportedAt: '2026-09-01T00:00:00Z',
+      lastReportedAt: '2026-09-01T00:00:00Z',
+    });
+  }
+  const newest = '2026-10-02T12:00:00Z';
+  await table.put({
+    ...deviceAntivirusFinding('d1', 'b'),
+    deviceId: 'd1',
+    findingId: 'b',
+    threatName: 'T',
+    severity: 'low',
+    detectedAt: newest,
+    resources: [],
+    remediated: false,
+    firstReportedAt: newest,
+    lastReportedAt: newest,
+  });
+  await table.put({
+    ...deviceAntivirusFinding('d1', 'a'),
+    deviceId: 'd1',
+    findingId: 'a',
+    threatName: 'T',
+    severity: 'low',
+    detectedAt: newest,
+    resources: [],
+    remediated: false,
+    firstReportedAt: newest,
+    lastReportedAt: newest,
+  });
+
+  // When an admin GETs /admin/api/v1/devices/d1
+  const response = await makeRequest(router, 'GET', '/admin/api/v1/devices/d1', {
+    headers: { authorization: 'Bearer valid-token' },
+  });
+
+  assert.strictEqual(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+
+  // Then antivirusFindings holds 50 entries, newest first, "a" before "b"
+  assert.strictEqual(body.antivirusFindings.length, 50);
+  assert.strictEqual(body.antivirusFindings[0].findingId, 'a');
+  assert.strictEqual(body.antivirusFindings[1].findingId, 'b');
+  for (let i = 1; i < body.antivirusFindings.length; i++) {
+    assert.ok(
+      body.antivirusFindings[i - 1].detectedAt >= body.antivirusFindings[i].detectedAt,
+      'findings should be sorted by detectedAt descending',
+    );
+  }
+
+  // With no pk, sk, gsi1pk or gsi1sk
+  for (const finding of body.antivirusFindings) {
+    assert.strictEqual(finding.pk, undefined);
+    assert.strictEqual(finding.sk, undefined);
+    assert.strictEqual(finding.gsi1pk, undefined);
+    assert.strictEqual(finding.gsi1sk, undefined);
+  }
+
+  // And profile, inventory, posture and commands are still present
+  assert.ok(body.profile);
+  assert.ok(body.inventory);
+  assert.ok(body.posture);
+  assert.ok(Array.isArray(body.commands));
+});
+
+test('Scenario: A device with no findings returns antivirusFindings []', async (t) => {
+  const router = createRouter();
+  const table = new FakeTable();
+  const verifier = new StubVerifier();
+
+  registerDeviceRoutes(router, { verifier, table });
+
+  await table.put({
+    pk: 'DEVICE#d1',
+    sk: 'PROFILE',
+    deviceId: 'd1',
+    hostname: 'host-d1',
+    platform: 'windows',
+    osVersion: '11',
+    agentVersion: '1.0',
+  });
+
+  const response = await makeRequest(router, 'GET', '/admin/api/v1/devices/d1', {
+    headers: { authorization: 'Bearer valid-token' },
+  });
+
+  assert.strictEqual(response.statusCode, 200);
+  const body = JSON.parse(response.body);
+  assert.deepStrictEqual(body.antivirusFindings, []);
 });
 
 // ============================================================================

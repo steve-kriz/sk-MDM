@@ -11,6 +11,7 @@ import {
   deviceInventory,
   devicePosture,
   deviceCommand,
+  deviceAntivirusFinding,
   deviceByHardware,
   group,
   groupMember,
@@ -45,6 +46,21 @@ test('Unit: devicePosture builds the correct key', () => {
 test('Unit: deviceCommand builds the correct key', () => {
   const key = deviceCommand('d1', 'c9');
   assert.deepStrictEqual(key, { pk: 'DEVICE#d1', sk: 'CMD#c9' });
+});
+
+test('Unit: deviceAntivirusFinding builds the correct key', () => {
+  const key = deviceAntivirusFinding('d1', 'f1');
+  assert.deepStrictEqual(key, { pk: 'DEVICE#d1', sk: 'AVFINDING#f1' });
+});
+
+test('Unit: deviceAntivirusFinding rejects a findingId containing the separator', () => {
+  assert.throws(
+    () => deviceAntivirusFinding('d1', 'bad#id'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: bad#id');
+      return true;
+    }
+  );
 });
 
 test('Unit: group builds the correct key', () => {

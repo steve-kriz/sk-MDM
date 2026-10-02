@@ -555,3 +555,73 @@ test('Scenario: render includes field-error element and disabled button on error
   assert.ok(html.includes('data-field'));
   assert.ok(html.includes('disabled'));
 });
+
+// ============================================================================
+// TASK-030: Antivirus Setting and Findings UI Tests
+// ============================================================================
+
+test('Scenario: Policy form offers the antivirus checkbox', async (t) => {
+  // When the policies view renders {settings:{antivirusEnabled:true}}
+  const checkedHtml = policiesModule.render({ settings: { antivirusEnabled: true } });
+  // Then the output contains input id "antivirus-enabled" name "antivirusEnabled" of type checkbox with the checked attribute
+  assert.match(
+    checkedHtml,
+    /<input id="antivirus-enabled" name="antivirusEnabled" type="checkbox"[^>]*checked[^>]*>/,
+  );
+
+  // And rendering {} gives that input without checked
+  const uncheckedHtml = policiesModule.render({});
+  const inputMatch = uncheckedHtml.match(/<input id="antivirus-enabled"[^>]*>/);
+  assert.ok(inputMatch, 'should render the antivirus-enabled input');
+  assert.ok(!inputMatch[0].includes('checked'), 'input should not carry checked');
+
+  // And settingsOf({settings:{antivirusEnabled:'true'}}) is {antivirusEnabled:true}
+  assert.deepStrictEqual(policiesModule.settingsOf({ settings: { antivirusEnabled: 'true' } }), {
+    antivirusEnabled: true,
+  });
+
+  // And createRequest({name:'av', settings:{antivirusEnabled:true}}).body.settings is {antivirusEnabled:true}
+  const request = policiesModule.createRequest({ name: 'av', settings: { antivirusEnabled: true } });
+  assert.deepStrictEqual(request.body.settings, { antivirusEnabled: true });
+});
+
+test('Scenario: Device detail screen renders antivirus state and findings', async (t) => {
+  // Given device detail state with posture.antivirus.enabled false and one finding
+  const state = {
+    profile: { deviceId: 'd1' },
+    posture: { antivirus: { enabled: false } },
+    antivirusFindings: [
+      {
+        detectedAt: '2026-10-02T07:15:00Z',
+        threatName: '<script>x</script>',
+        severity: 'severe',
+        remediated: true,
+        resources: ['C:\\a.exe', 'C:\\b.exe'],
+      },
+    ],
+  };
+
+  const html = deviceDetailModule.render(state);
+
+  // Then the posture section shows antivirus.enabled false
+  assert.ok(
+    html.includes('<span class="label">antivirus.enabled</span><span class="value">false</span>'),
+    'should show antivirus.enabled false',
+  );
+
+  // And section detail-antivirus-findings has one row with the expected columns
+  assert.ok(html.includes('id="detail-antivirus-findings"'));
+  assert.ok(html.includes('C:\\a.exe, C:\\b.exe'), 'resources should be joined with ", "');
+
+  // And the threatName is rendered escaped
+  assert.ok(html.includes('&lt;script&gt;x&lt;/script&gt;'));
+  assert.ok(!html.includes('<script>x</script>'));
+
+  // And with no findings the section contains the empty-state paragraph
+  const emptyHtml = deviceDetailModule.render({
+    profile: { deviceId: 'd1' },
+    posture: { antivirus: { enabled: true } },
+    antivirusFindings: [],
+  });
+  assert.ok(emptyHtml.includes('<p class="empty">No antivirus findings</p>'));
+});
