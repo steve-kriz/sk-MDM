@@ -140,11 +140,14 @@ type CheckInRequest struct {
 }
 
 // CheckInResponse is the body of a successful check-in.
+//
+// The key set is exactly these two: how long the agent waits before the next
+// check-in, and whether a command poll would find work. No policy information
+// is carried here -- a device's policies come from
+// GET /api/v1/devices/{deviceId}/policies.
 type CheckInResponse struct {
-	DeviceID            string `json:"deviceId"`
-	ReceivedAt          string `json:"receivedAt"` // ISO-8601 UTC
-	NextCheckInSeconds  int    `json:"nextCheckInSeconds"`
-	PendingCommandCount int    `json:"pendingCommandCount"`
+	CheckInIntervalSeconds int `json:"checkInIntervalSeconds"`
+	PendingCommandCount    int `json:"pendingCommandCount"`
 }
 
 // Command is one command leased to the device. Payload is left as raw JSON:

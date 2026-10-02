@@ -516,18 +516,17 @@ components:
     CheckInResponse:
       type: object
       additionalProperties: false
-      required: [deviceId, receivedAt, nextCheckInSeconds, pendingCommandCount]
+      required: [checkInIntervalSeconds, pendingCommandCount]
+      description: >-
+        Carries no policy information: a device's policies come from
+        GET /api/v1/devices/{deviceId}/policies.
       properties:
-        deviceId:
-          type: string
-        receivedAt:
-          type: string
-          format: date-time
-          description: ISO-8601 UTC.
-        nextCheckInSeconds:
+        checkInIntervalSeconds:
           type: integer
+          description: Seconds the agent waits before the next check-in.
         pendingCommandCount:
           type: integer
+          description: Commands waiting to be leased, so the agent can skip an empty poll.
 
     CommandLeaseResponse:
       type: object

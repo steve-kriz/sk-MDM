@@ -75,7 +75,7 @@ export {
   createCheckInHandler,
   registerCheckInRoute,
 } from './routes/checkin.js';
-export type { CheckInDependencies, CheckInRouteResponse, CheckInTable } from './routes/checkin.js';
+export type { CheckInDependencies, CheckInTable } from './routes/checkin.js';
 // --- end TASK-007 ----------------------------------------------------------
 
 function parseQuery(rawQueryString: string | undefined): Record<string, string> {

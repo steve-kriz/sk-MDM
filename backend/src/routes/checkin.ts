@@ -40,6 +40,7 @@
  */
 import { isoUtc } from '../audit.js';
 import { DEFAULT_CHECKIN_INTERVAL_SECONDS } from '../config/intervals.js';
+import type { CheckInResponse } from '../contract/types.js';
 import { deviceCommand, deviceInventory, deviceListIndex, devicePosture, deviceProfile, type TableKey } from '../db/keys.js';
 import type { Item, QueryPage, QueryRequest, RequestFields, WriteOutcome } from '../db/table.js';
 import { verifyDeviceRequest, type DeviceAuthResult, type EpochSecondsClock } from '../http/deviceAuth.js';
@@ -59,17 +60,6 @@ export const PENDING_STATUS = 'pending';
 
 /** `2026-10-02T07:15:00Z` -- the only timestamp shape the contract accepts. */
 const ISO_UTC_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
-
-/**
- * Body of a successful check-in.
- *
- * The key set is exactly these two: the agent needs to know when to come back
- * and whether a poll would find work. No policy information is carried here.
- */
-export interface CheckInRouteResponse {
-  checkInIntervalSeconds: number;
-  pendingCommandCount: number;
-}
 
 /**
  * The storage operations this route needs: the structural subset of
@@ -429,7 +419,7 @@ export function createCheckInHandler(source: CheckInDependencySource): RouteHand
       },
     });
 
-    const responseBody: CheckInRouteResponse = {
+    const responseBody: CheckInResponse = {
       checkInIntervalSeconds: DEFAULT_CHECKIN_INTERVAL_SECONDS,
       pendingCommandCount: await countPendingCommands(deps.table, deviceId),
     };
