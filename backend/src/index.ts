@@ -5,6 +5,7 @@
  * routes on the exported `router` and need no change here.
  */
 import { createRouter, type Router, type RouterRequest, type RouterResponse } from './http/router.js';
+import { registerEnrollRoute, resolveEnrollDependencies } from './routes/enroll.js';
 
 /** The subset of the Lambda Function URL (payload format 2.0) event we use. */
 export interface FunctionUrlEvent {
@@ -28,6 +29,16 @@ export interface FunctionUrlResponse {
 
 /** The application router. Register routes with `router.add(method, pattern, handler)`. */
 export const router: Router = createRouter();
+
+// --- TASK-006: POST /api/v1/enroll -----------------------------------------
+// Registered outside the device HMAC scheme: enroll is authenticated by its
+// `X-MDM-Enrollment-Token` alone. Dependencies are resolved on each request so
+// no AWS client is constructed at import time; start-up calls
+// `configureEnrollRoute({ table, pepper })` before the first request.
+registerEnrollRoute(router, resolveEnrollDependencies);
+export { ENROLL_PATH, configureEnrollRoute, createEnrollHandler, registerEnrollRoute } from './routes/enroll.js';
+export type { EnrollDependencies, EnrollTable, PepperSource } from './routes/enroll.js';
+// --- end TASK-006 ----------------------------------------------------------
 
 function parseQuery(rawQueryString: string | undefined): Record<string, string> {
   const query: Record<string, string> = {};
