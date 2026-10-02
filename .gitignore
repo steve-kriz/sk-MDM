@@ -1,6 +1,17 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
+backend/dist/
 cdk.out/
+agent/bin/
+
+# Installer artefacts
+*.msi
+*.pkg
+
+# Tooling / local state
 .claude-logs/
 tasks/
 .worktrees/
