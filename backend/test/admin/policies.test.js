@@ -523,3 +523,130 @@ test('Scenario: Compliance report stores per policy per device', async (t) => {
   assert.strictEqual(result.statusCode, 200);
   assert.deepStrictEqual(result.body.items, []);
 });
+
+// ============================================================================
+// TASK-029: Firewall and Domain Settings Tests
+// ============================================================================
+
+test('Scenario: POLICY_SETTING_KEYS holds exactly the seven keys', async (t) => {
+  const { POLICY_SETTING_KEYS } = await import(
+    `file://${join(__dirname, '../../dist/admin/policies.js')}`
+  );
+
+  const expectedKeys = [
+    'firewallEnabled',
+    'diskEncryptionRequired',
+    'screenLockTimeoutSeconds',
+    'osUpdateMaxAgeDays',
+    'localAdminAllowlist',
+    'firewallBlockedDomains',
+    'firewallAllowedDomains',
+  ];
+
+  assert.strictEqual(POLICY_SETTING_KEYS.length, 7);
+  assert.deepStrictEqual(POLICY_SETTING_KEYS.sort(), expectedKeys.sort());
+});
+
+test('Scenario: Policy with firewall and domain settings is stored with 201', async (t) => {
+  const table = new FakeTable();
+  const deps = createDependencies(table);
+
+  const request = createValidRequest('POST', '/admin/api/v1/policies', {
+    name: 'Firewall Policy',
+    settings: {
+      firewallEnabled: true,
+      firewallBlockedDomains: ['example.com'],
+      firewallAllowedDomains: ['intranet.example.org'],
+    },
+  });
+  request.params = {};
+  const result = await handlePolicyCreate(request, deps);
+
+  assert.strictEqual(result.statusCode, 201);
+  assert.ok(result.body.policyId);
+
+  const stored = table.getStoredItem(policyKey(result.body.policyId));
+  assert.ok(stored);
+  assert.deepStrictEqual(stored.settings, {
+    firewallEnabled: true,
+    firewallBlockedDomains: ['example.com'],
+    firewallAllowedDomains: ['intranet.example.org'],
+  });
+});
+
+test('Scenario: Empty domain array is accepted', async (t) => {
+  const table = new FakeTable();
+  const deps = createDependencies(table);
+
+  const request = createValidRequest('POST', '/admin/api/v1/policies', {
+    name: 'Policy with empty domains',
+    settings: {
+      firewallAllowedDomains: [],
+    },
+  });
+  request.params = {};
+  const result = await handlePolicyCreate(request, deps);
+
+  assert.strictEqual(result.statusCode, 201);
+});
+
+test('Scenario: Invalid domain list is refused on POST', async (t) => {
+  const table = new FakeTable();
+  const deps = createDependencies(table);
+
+  const invalidCases = [
+    { value: 'example.com', desc: 'non-array string' },
+    { value: [42], desc: 'non-string entry' },
+    { value: ['http://x.com'], desc: 'URL with scheme' },
+    { value: ['*.x.com'], desc: 'wildcard' },
+    { value: ['10.0.0.1'], desc: 'IP address' },
+    { value: ['localhost'], desc: 'single label' },
+    { value: ['a..b.com'], desc: 'empty label' },
+    { value: ['x.com\n127.0.0.1 bank.com'], desc: 'newline injection' },
+    { value: ['a'.repeat(254) + '.com'], desc: 'entry too long' },
+    { value: Array(501).fill('a.com'), desc: '501 entries' },
+  ];
+
+  for (const testCase of invalidCases) {
+    const request = createValidRequest('POST', '/admin/api/v1/policies', {
+      name: `Invalid test: ${testCase.desc}`,
+      settings: { firewallBlockedDomains: testCase.value },
+    });
+    request.params = {};
+    const result = await handlePolicyCreate(request, deps);
+
+    assert.strictEqual(result.statusCode, 400, `Expected 400 for ${testCase.desc}`);
+    assert.strictEqual(result.body.error, 'invalid_request');
+    assert.ok(result.body.fields.includes('settings.firewallBlockedDomains'));
+  }
+});
+
+test('Scenario: Invalid domain list is refused on PUT and version unchanged', async (t) => {
+  const table = new FakeTable();
+  const deps = createDependencies(table);
+
+  // Create initial policy
+  const createRequest = createValidRequest('POST', '/admin/api/v1/policies', {
+    name: 'Initial Policy',
+    settings: { firewallBlockedDomains: ['valid.com'] },
+  });
+  createRequest.params = {};
+  const createResult = await handlePolicyCreate(createRequest, deps);
+  const policyId = createResult.body.policyId;
+  const initialVersion = createResult.body.version;
+
+  // Try to update with invalid domains
+  const updateRequest = createValidRequest('PUT', `/admin/api/v1/policies/${policyId}`, {
+    name: 'Updated Policy',
+    settings: { firewallAllowedDomains: ['*.bad'] },
+  });
+  updateRequest.params = { policyId };
+  const updateResult = await handlePolicyUpdate(updateRequest, deps);
+
+  assert.strictEqual(updateResult.statusCode, 400);
+  assert.ok(updateResult.body.fields.includes('settings.firewallAllowedDomains'));
+
+  // Verify version is unchanged
+  const stored = table.getStoredItem(policyKey(policyId));
+  assert.strictEqual(stored.version, initialVersion);
+});
