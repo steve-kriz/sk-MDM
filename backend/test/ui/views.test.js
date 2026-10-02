@@ -467,8 +467,10 @@ test('Scenario: render outputs domain textareas', async (t) => {
 
 test('Scenario: settingsOf parses domain lists from comma/space/newline', async (t) => {
   const state1 = {
-    firewallBlockedDomains: 'a.com, b.com\nc.com',
-    firewallAllowedDomains: '',
+    settings: {
+      firewallBlockedDomains: 'a.com, b.com\nc.com',
+      firewallAllowedDomains: '',
+    },
   };
 
   const result1 = policiesModule.settingsOf(state1);
@@ -479,8 +481,10 @@ test('Scenario: settingsOf parses domain lists from comma/space/newline', async 
 
 test('Scenario: settingsOf omits empty keys', async (t) => {
   const state = {
-    firewallBlockedDomains: '',
-    firewallAllowedDomains: undefined,
+    settings: {
+      firewallBlockedDomains: '',
+      firewallAllowedDomains: undefined,
+    },
   };
 
   const result = policiesModule.settingsOf(state);
@@ -491,7 +495,9 @@ test('Scenario: settingsOf omits empty keys', async (t) => {
 
 test('Scenario: fieldErrors includes invalid domain entries', async (t) => {
   const state1 = {
-    firewallBlockedDomains: 'http://x.com',
+    settings: {
+      firewallBlockedDomains: 'http://x.com',
+    },
   };
 
   const errors1 = policiesModule.fieldErrors(state1);
@@ -499,7 +505,9 @@ test('Scenario: fieldErrors includes invalid domain entries', async (t) => {
   assert.ok(errors1.includes('firewallBlockedDomains'));
 
   const state2 = {
-    firewallAllowedDomains: '*.bad',
+    settings: {
+      firewallAllowedDomains: '*.bad',
+    },
   };
 
   const errors2 = policiesModule.fieldErrors(state2);
@@ -509,7 +517,9 @@ test('Scenario: fieldErrors includes invalid domain entries', async (t) => {
 
 test('Scenario: fieldErrors includes list with >500 entries', async (t) => {
   const state = {
-    firewallBlockedDomains: Array(501).fill('a.com').join('\n'),
+    settings: {
+      firewallBlockedDomains: Array(501).fill('a.com').join('\n'),
+    },
   };
 
   const errors = policiesModule.fieldErrors(state);
@@ -520,7 +530,9 @@ test('Scenario: fieldErrors includes list with >500 entries', async (t) => {
 test('Scenario: createRequest returns null when fieldErrors present', async (t) => {
   const state = {
     name: 'Policy',
-    firewallBlockedDomains: 'invalid..domain',
+    settings: {
+      firewallBlockedDomains: 'invalid..domain',
+    },
   };
 
   const result = policiesModule.createRequest(state);
@@ -531,7 +543,9 @@ test('Scenario: createRequest returns null when fieldErrors present', async (t) 
 test('Scenario: render includes field-error element and disabled button on errors', async (t) => {
   const state = {
     name: 'Policy',
-    firewallBlockedDomains: 'invalid',
+    settings: {
+      firewallBlockedDomains: 'invalid',
+    },
   };
 
   const html = policiesModule.render(state);

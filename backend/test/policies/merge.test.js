@@ -213,5 +213,5 @@ test('Scenario: Domain lists merge by smallest policy id, not unioned', (t) => {
   const conflict = result.conflicts[0];
   assert.strictEqual(conflict.key, 'firewallBlockedDomains');
   assert.strictEqual(conflict.winningPolicyId, 'p-aaa');
-  assert.ok(conflict.losers.includes('p-bbb'));
+  assert.ok(conflict.losers.some(loser => loser.policyId === 'p-bbb'));
 });
