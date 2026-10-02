@@ -37,6 +37,7 @@ import { randomBytes as cryptoRandomBytes } from 'node:crypto';
 import { isVerifyFailure, type TokenClaims, type TokenVerifier } from '../auth/entra.js';
 import { queryAudit, type AuditPage } from '../audit.js';
 import type { TableKey } from '../db/keys.js';
+import type { GraphDirectory } from '../graph/client.js';
 import { decodeCursor, type Item, type QueryPage, type QueryRequest, type RequestFields } from '../db/table.js';
 import type { RouteHandler, RouteRequest, RouteResult, Router } from '../http/router.js';
 
@@ -97,6 +98,8 @@ export interface AdminDependencies {
   now?: AdminClock;
   /** Random source used by the write routes. Defaults to `node:crypto`. */
   randomBytes?: AdminRandomBytes;
+  /** Microsoft Graph, for the user-link routes. `undefined` when Graph is not configured. */
+  graph?: GraphDirectory;
 }
 
 /** Dependencies, or something that resolves them when the request arrives. */

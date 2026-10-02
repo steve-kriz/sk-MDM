@@ -11,6 +11,7 @@ import { registerEnrollmentTokenRoutes } from './admin/enrollmentTokens.js';
 import { registerGroupRoutes } from './admin/groups.js';
 import { registerPolicyRoutes } from './admin/policies.js';
 import { registerAuditRoutes, resolveAdminDependencies } from './admin/router.js';
+import { registerUserLinkRoutes } from './admin/userLinks.js';
 import { createRouter, type Router, type RouterRequest, type RouterResponse } from './http/router.js';
 import { registerCheckInRoute, resolveCheckInDependencies } from './routes/checkin.js';
 import { registerCommandRoutes, type CommandRouteDeps } from './routes/commands.js';
@@ -305,6 +306,59 @@ export {
   registerAgentReleaseRoutes,
 } from './admin/agentRelease.js';
 // --- end TASK-022 ----------------------------------------------------------
+
+// --- TASK-027: Entra user links through Microsoft Graph ---------------------
+// Two admin writes behind the same token verifier. Graph arrives as the
+// optional `graph` admin dependency (built by bootstrap from the environment);
+// when it is absent both routes answer 503 `graph_not_configured`.
+registerUserLinkRoutes(router, resolveAdminDependencies);
+export {
+  DEVICE_USER_LINK_REFRESHED_ACTION,
+  DEVICE_USER_LINK_REFRESH_PATH,
+  USER_LINKS_DEFAULT_LIMIT,
+  USER_LINKS_MAX_LIMIT,
+  USER_LINKS_REFRESHED_ACTION,
+  USER_LINKS_REFRESH_PATH,
+  USER_LINK_STATUSES,
+  handleDeviceUserLinkRefresh,
+  handleUserLinksBulkRefresh,
+  lookupName,
+  registerUserLinkRoutes,
+  resolveUserLink,
+  userLinkTable,
+} from './admin/userLinks.js';
+export type { UserLinkStatus, UserLinkTable, UserLinkUser } from './admin/userLinks.js';
+export {
+  DEFAULT_GRAPH_SECRET_KEY,
+  DEFAULT_GRAPH_TIMEOUT_MILLIS,
+  GRAPH_BASE_URL,
+  GRAPH_SCOPE,
+  GRAPH_USER_TYPE,
+  MAX_GRAPH_PAGES,
+  TOKEN_EXPIRY_LEEWAY_SECONDS,
+  createGraphClient,
+  createGraphDirectoryFromEnv,
+  createGraphSecretProvider,
+  isGraphFailure,
+  odataString,
+  tokenUrl,
+} from './graph/client.js';
+export type {
+  ClientSecretSource,
+  GraphClientOptions,
+  GraphClock,
+  GraphDevice,
+  GraphDirectory,
+  GraphDirectoryDependencies,
+  GraphFailure,
+  GraphFetch,
+  GraphFetchInit,
+  GraphFetchResponse,
+  GraphSecretProviderOptions,
+  GraphUser,
+} from './graph/client.js';
+export { deviceUserLink } from './db/keys.js';
+// --- end TASK-027 ----------------------------------------------------------
 
 function parseQuery(rawQueryString: string | undefined): Record<string, string> {
   const query: Record<string, string> = {};

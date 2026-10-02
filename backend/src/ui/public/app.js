@@ -210,17 +210,48 @@ export function paint(screen, param) {
   mount().innerHTML = `${navigation(screen)}${banner}${screenHtml(screen, param)}`;
 }
 
-/** Load and render whatever the address bar names. */
-export async function show() {
+/**
+ * Load and render whatever the address bar names.
+ *
+ * `error` is the banner to keep across the reload -- a refresh that failed
+ * reloads the screen and must still say why. With no argument the banner is
+ * cleared. A load failure overwrites it either way.
+ */
+export async function show({ error } = {}) {
   const { screen, param } = routeOf(window.location.hash);
   state.screen = screen;
-  state.error = null;
+  state.error = error ?? null;
   try {
     await load(screen, param);
   } catch (error) {
     state.error = error instanceof Error ? error.message : String(error);
   }
   paint(screen, param);
+}
+
+/** The most bulk refresh requests one click sends, however many pages the fleet has. */
+export const MAX_REFRESH_CALLS = 100;
+
+/**
+ * Refresh every device's user link, one fleet page per request, following the
+ * cursor until the last page. Stops at the first failure.
+ */
+export async function refreshAllUserLinks(postFn) {
+  let cursor = null;
+  let calls = 0;
+  while (calls < MAX_REFRESH_CALLS) {
+    const response = await postFn('/user-links/refresh', { cursor });
+    calls += 1;
+    if (!response?.ok) {
+      return { ok: false, error: response?.data?.error ?? 'request_failed' };
+    }
+    const next = response.data?.cursor;
+    if (next === null || next === undefined || next === '') {
+      break;
+    }
+    cursor = next;
+  }
+  return { ok: true, calls };
 }
 
 /** The value of a named form field, as a string. */
@@ -308,6 +339,20 @@ async function onClick(event) {
       policiesView.unassignRequest({ policyId: fieldValue(form, 'policyId'), groupId: fieldValue(form, 'groupId') }),
     );
     await show();
+    return;
+  }
+
+  const refreshAll = event.target.closest('.refresh-user-links');
+  if (refreshAll !== null) {
+    const result = await refreshAllUserLinks(post);
+    await (result.ok ? show() : show({ error: result.error }));
+    return;
+  }
+
+  const refreshOne = event.target.closest('.refresh-user-link');
+  if (refreshOne !== null) {
+    const response = await post(`/devices/${refreshOne.dataset.deviceId}/user-link/refresh`, {});
+    await (response.ok ? show() : show({ error: response.data?.error ?? 'request_failed' }));
     return;
   }
 

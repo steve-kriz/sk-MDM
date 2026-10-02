@@ -20,6 +20,7 @@ import { createJwksFetcher, type FetchLike } from './aws/jwks.js';
 import { createSecretsClientAdapter, type SdkSecretsClient } from './aws/secrets.js';
 import { createPepperProvider } from './crypto/pepper.js';
 import { createTableClient, type TableClient } from './db/table.js';
+import { createGraphDirectoryFromEnv, type GraphFetch } from './graph/client.js';
 import {
   configureAdminRoutes,
   configureCheckInRoute,
@@ -89,10 +90,9 @@ export async function bootstrap({
     documentClient: createSdkDocumentClientAdapter(createDocumentClient()),
     tableName,
   });
-  const getPepper = createPepperProvider({
-    secretsClient: createSecretsClientAdapter(createSecretsClient()),
-    secretArn,
-  });
+  // One adapter, shared by the pepper and the Graph client secret (TASK-027).
+  const secretsClient = createSecretsClientAdapter(createSecretsClient());
+  const getPepper = createPepperProvider({ secretsClient, secretArn });
   const pepper = await getPepper();
 
   const verifier = createTokenVerifier({
@@ -106,7 +106,17 @@ export async function bootstrap({
   configureEnrollRoute({ table, pepper });
   configureCheckInRoute({ table, pepper });
   configurePolicyBundleRoute({ table, pepper });
-  configureAdminRoutes({ verifier, table });
+  configureAdminRoutes({
+    verifier,
+    table,
+    // Building the directory sends nothing: the secret and token are read on
+    // the first user-link refresh.
+    graph: createGraphDirectoryFromEnv(env, {
+      secretsClient,
+      fetch: fetchImpl as GraphFetch,
+      now: epochSeconds,
+    }),
+  });
   setCommandRouteDeps({ table, pepper, now: epochSeconds });
 
   return { table, verifier };
