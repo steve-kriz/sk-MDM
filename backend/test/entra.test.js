@@ -580,9 +580,11 @@ test('Unit: Token with invalid signature', async (t) => {
   const payload = createBaseToken(now);
   let token = signJwt(header, payload, privateKey);
 
-  // Corrupt the signature
+  // Corrupt the signature. Flip a middle character: the last base64url char of a
+  // 256-byte signature carries padding bits, so changing it can leave the bytes intact.
   const parts = token.split('.');
-  parts[2] = parts[2].substring(0, parts[2].length - 1) + (parts[2][parts[2].length - 1] === 'A' ? 'B' : 'A');
+  const mid = Math.floor(parts[2].length / 2);
+  parts[2] = parts[2].substring(0, mid) + (parts[2][mid] === 'A' ? 'B' : 'A') + parts[2].substring(mid + 1);
   token = parts.join('.');
 
   const verifier = createTokenVerifier({
