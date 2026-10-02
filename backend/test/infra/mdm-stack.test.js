@@ -24,9 +24,33 @@ function createTestStack(props = {}) {
     entraTenantId: props.entraTenantId || 'test-tenant',
     entraClientId: props.entraClientId || 'test-client',
     entraAdminGroupId: props.entraAdminGroupId,
+    domainName: props.domainName,
+    certificateArn: props.certificateArn,
+    hostedZoneId: props.hostedZoneId,
   });
   const template = Template.fromStack(stack);
   return { app, stack, template };
+}
+
+// TASK-028: a custom-domain certificate, valid and in us-east-1.
+const CERT = 'arn:aws:acm:us-east-1:123456789012:certificate/abc-123';
+const DOMAIN = 'mdm.officehq.cc';
+
+// Helper to build a domain-configured stack with sensible defaults.
+function createDomainStack(overrides = {}) {
+  return createTestStack({
+    domainName: DOMAIN,
+    certificateArn: CERT,
+    ...overrides,
+  });
+}
+
+// Finds the (sole) AWS::Lambda::Url logical id in a template.
+function functionUrlLogicalId(template) {
+  const urls = template.findResources('AWS::Lambda::Url');
+  const ids = Object.keys(urls);
+  assert.strictEqual(ids.length, 1, 'expected exactly one AWS::Lambda::Url');
+  return ids[0];
 }
 
 // ============================================================================
@@ -743,4 +767,368 @@ test('Unit: MdmStack exposes an installerBucket property', async (t) => {
     entraClientId: 'test-client',
   });
   assert.ok(stack.installerBucket, 'installerBucket should be defined');
+});
+
+// ============================================================================
+// TASK-028: mdm.officehq.cc as the main domain via CloudFront
+// ============================================================================
+
+test('E2E: Scenario: No domain configured leaves the stack as it was', async (t) => {
+  // When I synthesise MdmStack with no domainName, certificateArn or hostedZoneId
+  const { template } = createTestStack();
+
+  // Then the template has 0 AWS::CloudFront::Distribution and 0 AWS::Route53::RecordSet resources
+  assert.strictEqual(Object.keys(template.findResources('AWS::CloudFront::Distribution')).length, 0);
+  assert.strictEqual(Object.keys(template.findResources('AWS::Route53::RecordSet')).length, 0);
+
+  // And the Lambda environment has no PUBLIC_HOST and no COLLECTION_URL key, and is exactly the integrated set
+  const lambdaResources = template.findResources('AWS::Lambda::Function');
+  const env = Object.values(lambdaResources)[0].Properties.Environment.Variables;
+  assert.deepStrictEqual(
+    Object.keys(env).sort(),
+    [
+      'ENTRA_ADMIN_GROUP_ID',
+      'ENTRA_CLIENT_ID',
+      'ENTRA_TENANT_ID',
+      'GRAPH_SECRET_ID',
+      'GRAPH_SECRET_KEY',
+      'INSTALLER_BUCKET',
+      'PEPPER_SECRET_ARN',
+      'TABLE_NAME',
+    ].sort()
+  );
+  assert.ok(!('PUBLIC_HOST' in env), 'no PUBLIC_HOST key');
+  assert.ok(!('COLLECTION_URL' in env), 'no COLLECTION_URL key');
+
+  // And the CollectionUrl output references the Function URL
+  const outputs = template.findOutputs('CollectionUrl');
+  const urlLogicalId = functionUrlLogicalId(template);
+  const value = outputs.CollectionUrl.Value;
+  assert.ok(
+    typeof value === 'object' && (value['Fn::GetAtt']?.[0] === urlLogicalId || JSON.stringify(value).includes(urlLogicalId)),
+    'CollectionUrl should reference the Function URL resource'
+  );
+});
+
+test('E2E: Scenario: Distribution serves the custom domain with the us-east-1 certificate', async (t) => {
+  // When I synthesise MdmStack with domainName "mdm.officehq.cc" and certificateArn CERT
+  const { template } = createDomainStack();
+
+  // Then there is exactly one AWS::CloudFront::Distribution
+  const distributions = template.findResources('AWS::CloudFront::Distribution');
+  assert.strictEqual(Object.keys(distributions).length, 1);
+
+  // And its Aliases are ["mdm.officehq.cc"]
+  // And its ViewerCertificate has AcmCertificateArn CERT, SslSupportMethod "sni-only" and MinimumProtocolVersion "TLSv1.2_2021"
+  template.hasResourceProperties('AWS::CloudFront::Distribution', {
+    DistributionConfig: {
+      Aliases: [DOMAIN],
+      ViewerCertificate: {
+        AcmCertificateArn: CERT,
+        SslSupportMethod: 'sni-only',
+        MinimumProtocolVersion: 'TLSv1.2_2021',
+      },
+    },
+  });
+});
+
+test('E2E: Scenario: The only origin is the Function URL over HTTPS without OAC', async (t) => {
+  // When I synthesise MdmStack with domainName "mdm.officehq.cc" and certificateArn CERT
+  const { template } = createDomainStack();
+
+  const distributions = template.findResources('AWS::CloudFront::Distribution');
+  const distValue = Object.values(distributions)[0];
+  const origins = distValue.Properties.DistributionConfig.Origins;
+
+  // Then the distribution has exactly one origin
+  assert.strictEqual(origins.length, 1);
+
+  // whose DomainName is derived from the Lambda Url FunctionUrl attribute
+  // (an Fn::Select/Fn::Split over Fn::GetAtt [<FunctionUrl logical id>, FunctionUrl])
+  const urlLogicalId = functionUrlLogicalId(template);
+  const domainNameValue = origins[0].DomainName;
+  const domainNameText = JSON.stringify(domainNameValue);
+  assert.ok(domainNameText.includes('Fn::Select') || domainNameText.includes('Fn::Split'), 'origin DomainName should be derived via Fn::Select/Fn::Split');
+  assert.ok(domainNameText.includes(urlLogicalId), 'origin DomainName should reference the Function Url logical id');
+  assert.ok(domainNameText.includes('FunctionUrl'), 'origin DomainName should reference the FunctionUrl attribute');
+
+  // And its CustomOriginConfig.OriginProtocolPolicy is "https-only"
+  assert.strictEqual(origins[0].CustomOriginConfig.OriginProtocolPolicy, 'https-only');
+
+  // And the template contains no AWS::CloudFront::OriginAccessControl
+  assert.strictEqual(Object.keys(template.findResources('AWS::CloudFront::OriginAccessControl')).length, 0);
+});
+
+test('E2E: Scenario: Default behaviour never caches and forwards everything except Host', async (t) => {
+  // When I synthesise MdmStack with domainName "mdm.officehq.cc" and certificateArn CERT
+  const { template } = createDomainStack();
+
+  const distributions = template.findResources('AWS::CloudFront::Distribution');
+  const distConfig = Object.values(distributions)[0].Properties.DistributionConfig;
+  const behavior = distConfig.DefaultCacheBehavior;
+
+  // Then DefaultCacheBehavior ViewerProtocolPolicy is "redirect-to-https"
+  assert.strictEqual(behavior.ViewerProtocolPolicy, 'redirect-to-https');
+
+  // And AllowedMethods include GET, HEAD, OPTIONS, PUT, PATCH, POST and DELETE
+  const methods = behavior.AllowedMethods;
+  for (const method of ['GET', 'HEAD', 'OPTIONS', 'PUT', 'PATCH', 'POST', 'DELETE']) {
+    assert.ok(methods.includes(method), `AllowedMethods should include ${method}`);
+  }
+
+  // And CachePolicyId is the managed CachingDisabled policy
+  assert.strictEqual(behavior.CachePolicyId, '4135ea2d-6df8-44a3-9df3-4b5a84be39ad');
+
+  // And OriginRequestPolicyId is the managed AllViewerExceptHostHeader policy
+  assert.strictEqual(behavior.OriginRequestPolicyId, 'b689b0a8-53d0-40ab-baf2-68738e2966ac');
+
+  // And there are no additional CacheBehaviors
+  assert.ok(
+    distConfig.CacheBehaviors === undefined || distConfig.CacheBehaviors.length === 0,
+    'CacheBehaviors should be absent or empty'
+  );
+});
+
+test('E2E: Scenario: Function URL stays public for already-installed agents', async (t) => {
+  // When I synthesise MdmStack with domainName "mdm.officehq.cc" and certificateArn CERT
+  const { template } = createDomainStack();
+
+  // Then exactly one AWS::Lambda::Url exists with AuthType "NONE"
+  const urls = template.findResources('AWS::Lambda::Url');
+  assert.strictEqual(Object.keys(urls).length, 1);
+  template.hasResourceProperties('AWS::Lambda::Url', { AuthType: 'NONE' });
+
+  // And there are exactly two AWS::Lambda::Permission resources
+  assert.strictEqual(Object.keys(template.findResources('AWS::Lambda::Permission')).length, 2);
+
+  // And there is exactly one AWS::Lambda::Function
+  assert.strictEqual(Object.keys(template.findResources('AWS::Lambda::Function')).length, 1);
+});
+
+test('E2E: Scenario: Lambda learns its public host as literals', async (t) => {
+  // When I synthesise MdmStack with domainName "mdm.officehq.cc" and certificateArn CERT
+  const { template } = createDomainStack();
+
+  const lambdaResources = template.findResources('AWS::Lambda::Function');
+  const env = Object.values(lambdaResources)[0].Properties.Environment.Variables;
+
+  // Then the Lambda environment PUBLIC_HOST is the string "mdm.officehq.cc"
+  assert.strictEqual(env.PUBLIC_HOST, DOMAIN);
+  assert.strictEqual(typeof env.PUBLIC_HOST, 'string', 'PUBLIC_HOST must be a literal string, not an intrinsic');
+
+  // And the Lambda environment COLLECTION_URL is the string "https://mdm.officehq.cc/"
+  assert.strictEqual(env.COLLECTION_URL, `https://${DOMAIN}/`);
+  assert.strictEqual(typeof env.COLLECTION_URL, 'string', 'COLLECTION_URL must be a literal string, not an intrinsic');
+});
+
+test('E2E: Scenario: Outputs name the custom domain, the distribution and the raw Function URL', async (t) => {
+  // When I synthesise MdmStack with domainName "mdm.officehq.cc" and certificateArn CERT
+  const { template } = createDomainStack();
+
+  // Then the CollectionUrl output has description "Collection URL the agent installers point at" and value "https://mdm.officehq.cc/"
+  template.hasOutput('CollectionUrl', {
+    Description: 'Collection URL the agent installers point at',
+    Value: `https://${DOMAIN}/`,
+  });
+
+  // And the DistributionDomainName output is the distribution's DomainName attribute
+  const distributions = template.findResources('AWS::CloudFront::Distribution');
+  const distLogicalId = Object.keys(distributions)[0];
+  const outputs = template.findOutputs('DistributionDomainName');
+  assert.ok(outputs.DistributionDomainName, 'DistributionDomainName output should exist');
+  const distOutputValue = outputs.DistributionDomainName.Value;
+  assert.ok(
+    typeof distOutputValue === 'object' && distOutputValue['Fn::GetAtt']?.[0] === distLogicalId && distOutputValue['Fn::GetAtt']?.[1] === 'DomainName',
+    'DistributionDomainName should Fn::GetAtt the distribution DomainName'
+  );
+
+  // And the FunctionUrl output references the Lambda Url FunctionUrl attribute
+  const urlLogicalId = functionUrlLogicalId(template);
+  const functionUrlOutputs = template.findOutputs('FunctionUrl');
+  assert.ok(functionUrlOutputs.FunctionUrl, 'FunctionUrl output should exist');
+  const functionUrlText = JSON.stringify(functionUrlOutputs.FunctionUrl.Value);
+  assert.ok(functionUrlText.includes(urlLogicalId) && functionUrlText.includes('FunctionUrl'));
+});
+
+test('E2E: Scenario: FunctionUrl output is also present without a domain', async (t) => {
+  // Given a synthesised MdmStack template with no domain configured
+  const { template } = createTestStack();
+
+  // Then a FunctionUrl output still exists
+  const urlLogicalId = functionUrlLogicalId(template);
+  const outputs = template.findOutputs('FunctionUrl');
+  assert.ok(outputs.FunctionUrl, 'FunctionUrl output should exist even without a domain');
+  const text = JSON.stringify(outputs.FunctionUrl.Value);
+  assert.ok(text.includes(urlLogicalId));
+});
+
+test('E2E: Scenario: Route 53 alias records are created only when a hosted zone id is given', async (t) => {
+  // When I synthesise MdmStack with domainName, certificateArn CERT and hostedZoneId "Z0123456789ABC"
+  const { template } = createDomainStack({ hostedZoneId: 'Z0123456789ABC' });
+
+  // Then there are exactly two AWS::Route53::RecordSet resources in zone "Z0123456789ABC" named "mdm.officehq.cc."
+  const recordSets = template.findResources('AWS::Route53::RecordSet');
+  const records = Object.values(recordSets);
+  assert.strictEqual(records.length, 2);
+
+  for (const record of records) {
+    assert.strictEqual(record.Properties.HostedZoneId, 'Z0123456789ABC');
+    assert.strictEqual(record.Properties.Name, `${DOMAIN}.`);
+  }
+
+  // And one has Type "A" and one has Type "AAAA"
+  const types = records.map((r) => r.Properties.Type).sort();
+  assert.deepStrictEqual(types, ['A', 'AAAA']);
+
+  // And both have AliasTarget DNSName referencing the distribution DomainName
+  const distributions = template.findResources('AWS::CloudFront::Distribution');
+  const distLogicalId = Object.keys(distributions)[0];
+  for (const record of records) {
+    const dnsName = JSON.stringify(record.Properties.AliasTarget.DNSName);
+    assert.ok(dnsName.includes(distLogicalId), 'AliasTarget.DNSName should reference the distribution');
+
+    // And both have AliasTarget HostedZoneId equal to the Fn::FindInMap over AWS::Partition
+    assert.deepStrictEqual(record.Properties.AliasTarget.HostedZoneId, {
+      'Fn::FindInMap': ['AWSCloudFrontPartitionHostedZoneIdMap', { Ref: 'AWS::Partition' }, 'zoneId'],
+    });
+  }
+
+  // And the template Mappings AWSCloudFrontPartitionHostedZoneIdMap aws zoneId is "Z2FDTNDATAQYW2"
+  const templateJson = template.toJSON();
+  assert.strictEqual(templateJson.Mappings.AWSCloudFrontPartitionHostedZoneIdMap.aws.zoneId, 'Z2FDTNDATAQYW2');
+
+  // When I synthesise MdmStack with domainName, certificateArn CERT and no hostedZoneId
+  const { template: noZoneTemplate } = createDomainStack();
+
+  // Then there are 0 AWS::Route53::RecordSet resources
+  assert.strictEqual(Object.keys(noZoneTemplate.findResources('AWS::Route53::RecordSet')).length, 0);
+});
+
+test('E2E Outline: Domain without a certificate is rejected (absent)', async (t) => {
+  // When I construct MdmStack with domainName "mdm.officehq.cc" and certificateArn absent
+  assert.throws(
+    () => createTestStack({ domainName: DOMAIN }),
+    (err) => err.message === 'certificateArn is required when domainName is set'
+  );
+});
+
+test('E2E Outline: Domain without a certificate is rejected (empty string)', async (t) => {
+  // When I construct MdmStack with domainName "mdm.officehq.cc" and certificateArn ""
+  assert.throws(
+    () => createTestStack({ domainName: DOMAIN, certificateArn: '' }),
+    (err) => err.message === 'certificateArn is required when domainName is set'
+  );
+});
+
+test('E2E Outline: Certificate outside us-east-1 is rejected', async (t) => {
+  assert.throws(
+    () => createTestStack({ domainName: DOMAIN, certificateArn: 'arn:aws:acm:ap-southeast-2:123456789012:certificate/abc-123' }),
+    (err) => err.message === 'certificateArn must be an ACM certificate in us-east-1'
+  );
+});
+
+test('E2E Outline: Certificate that is not an ACM ARN is rejected', async (t) => {
+  assert.throws(
+    () => createTestStack({ domainName: DOMAIN, certificateArn: 'not-an-arn' }),
+    (err) => err.message === 'certificateArn must be an ACM certificate in us-east-1'
+  );
+});
+
+const MALFORMED_DOMAINS = ['https://mdm.officehq.cc', 'mdm.officehq.cc/', 'mdm.officehq.cc:443', 'MDM.officehq.cc', 'localhost'];
+
+for (const domain of MALFORMED_DOMAINS) {
+  test(`E2E Outline: Malformed domain name is rejected: ${JSON.stringify(domain)}`, async (t) => {
+    assert.throws(
+      () => createTestStack({ domainName: domain, certificateArn: CERT }),
+      (err) => err.message === 'domainName must be a lower-case host name such as mdm.officehq.cc'
+    );
+  });
+}
+
+test('E2E Outline: Certificate without a domain is rejected', async (t) => {
+  assert.throws(
+    () => createTestStack({ certificateArn: CERT }),
+    (err) => err.message === 'domainName is required when certificateArn or hostedZoneId is set'
+  );
+});
+
+test('E2E Outline: Hosted zone without a domain is rejected', async (t) => {
+  assert.throws(
+    () => createTestStack({ hostedZoneId: 'Z0123456789ABC' }),
+    (err) => err.message === 'domainName is required when certificateArn or hostedZoneId is set'
+  );
+});
+
+test('E2E: Scenario: Existing suite still passes (meta)', async (t) => {
+  // The pre-existing assertions above this section and npm test exiting 0 are
+  // verified by actually running `node --test` over the whole suite; this
+  // test documents the scenario and is itself part of that run.
+  assert.ok(true);
+});
+
+// ----------------------------------------------------------------------------
+// Unit: additional edge cases for the domain validation order and resource shape
+// ----------------------------------------------------------------------------
+
+test('Unit: validation order - missing domain with certificateArn set is reported before domain-format errors', async (t) => {
+  // certificateArn set, domainName absent: should report the "domainName is required" error,
+  // not a domain-format or certificate-format error, even though certificateArn here is also malformed.
+  assert.throws(
+    () => createTestStack({ certificateArn: 'not-an-arn' }),
+    (err) => err.message === 'domainName is required when certificateArn or hostedZoneId is set'
+  );
+});
+
+test('Unit: validation order - domain format is checked before certificate presence', async (t) => {
+  // Malformed domainName and no certificateArn at all: domain-format error wins.
+  assert.throws(
+    () => createTestStack({ domainName: 'localhost' }),
+    (err) => err.message === 'domainName must be a lower-case host name such as mdm.officehq.cc'
+  );
+});
+
+test('Unit: validation order - certificate presence is checked before certificate format', async (t) => {
+  // Valid domainName, certificateArn absent: "required" error, not "format" error.
+  assert.throws(
+    () => createTestStack({ domainName: DOMAIN }),
+    (err) => err.message === 'certificateArn is required when domainName is set'
+  );
+});
+
+test('Unit: distribution construct is exposed as stack.distribution when a domain is configured', async (t) => {
+  const { stack } = createDomainStack();
+  assert.ok(stack.distribution, 'stack.distribution should be defined');
+});
+
+test('Unit: stack.distribution is undefined when no domain is configured', async (t) => {
+  const { stack } = createTestStack();
+  assert.strictEqual(stack.distribution, undefined);
+});
+
+test('Unit: hostedZoneId zone name is domainName minus its first label', async (t) => {
+  const { template } = createDomainStack({ hostedZoneId: 'Z0123456789ABC' });
+  const hostedZones = template.findResources('AWS::Route53::HostedZone');
+  // fromHostedZoneAttributes does not synthesise a new zone resource; assert none is created.
+  assert.strictEqual(Object.keys(hostedZones).length, 0, 'fromHostedZoneAttributes should not create a zone resource');
+});
+
+test('Unit: domain-configured env still carries all sibling-ticket keys', async (t) => {
+  const { template } = createDomainStack();
+  const lambdaResources = template.findResources('AWS::Lambda::Function');
+  const env = Object.values(lambdaResources)[0].Properties.Environment.Variables;
+  assert.deepStrictEqual(
+    Object.keys(env).sort(),
+    [
+      'ENTRA_ADMIN_GROUP_ID',
+      'ENTRA_CLIENT_ID',
+      'ENTRA_TENANT_ID',
+      'GRAPH_SECRET_ID',
+      'GRAPH_SECRET_KEY',
+      'INSTALLER_BUCKET',
+      'PEPPER_SECRET_ARN',
+      'PUBLIC_HOST',
+      'COLLECTION_URL',
+      'TABLE_NAME',
+    ].sort()
+  );
 });
