@@ -1,0 +1,11 @@
+#!/bin/sh
+# Runs as root before the package writes anything.
+#
+# It boots out any agent already loaded so the upgrade replaces a binary no
+# running process holds open. Nothing here is an error: on a first install
+# there is no daemon to boot out, so the bootout is best effort and the script
+# always reports success.
+
+launchctl bootout system /Library/LaunchDaemons/au.com.officehq.mdmagent.plist || true
+
+exit 0
