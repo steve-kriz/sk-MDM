@@ -14,6 +14,7 @@
  * client is wrapped by `createSdkDocumentClientAdapter` and the secrets client
  * by `createSecretsClientAdapter`, so a real Command always reaches the SDK.
  */
+import { S3Client } from '@aws-sdk/client-s3';
 import { createTokenVerifier } from './auth/entra.js';
 import { createSdkDocumentClientAdapter, type SdkDocumentClient } from './aws/documentClient.js';
 import { createJwksFetcher, type FetchLike } from './aws/jwks.js';
@@ -23,10 +24,12 @@ import { createTableClient, type TableClient } from './db/table.js';
 import {
   configureAdminRoutes,
   configureCheckInRoute,
+  configureDownloadRoute,
   configureEnrollRoute,
   configurePolicyBundleRoute,
   setCommandRouteDeps,
 } from './index.js';
+import { createS3InstallerStore } from './storage/installers.js';
 import type { TokenVerifier } from './auth/entra.js';
 
 /** The Lambda environment variables bootstrap cannot run without, in the order they are checked. */
@@ -47,6 +50,8 @@ export interface BootstrapOptions {
   createSecretsClient: () => SdkSecretsClient;
   /** The `fetch` the JWKS fetcher uses. */
   fetchImpl?: FetchLike | typeof globalThis.fetch;
+  /** Builds the SDK-shaped S3 client the installer store wraps. Defaults to `new S3Client({})`. */
+  createS3Client?: () => S3Client;
 }
 
 /** What bootstrap configured the routes with. */
@@ -77,6 +82,7 @@ export async function bootstrap({
   createDocumentClient,
   createSecretsClient,
   fetchImpl = globalThis.fetch,
+  createS3Client = (): S3Client => new S3Client({}),
 }: BootstrapOptions): Promise<BootstrapResult> {
   const {
     TABLE_NAME: tableName,
@@ -108,6 +114,13 @@ export async function bootstrap({
   configurePolicyBundleRoute({ table, pepper });
   configureAdminRoutes({ verifier, table });
   setCommandRouteDeps({ table, pepper, now: epochSeconds });
+  // Not a required variable: without a bucket the download route answers
+  // 500 not_configured and every other route still runs.
+  const installerBucket = env.INSTALLER_BUCKET ?? '';
+  configureDownloadRoute({
+    bucket: installerBucket,
+    installers: createS3InstallerStore({ bucket: installerBucket, client: createS3Client() }),
+  });
 
   return { table, verifier };
 }

@@ -13,10 +13,11 @@
  */
 import { fileURLToPath } from 'node:url';
 
-import { CfnOutput, Duration, Stack, type StackProps } from 'aws-cdk-lib';
+import { CfnOutput, Duration, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import type { Construct } from 'constructs';
 
@@ -54,6 +55,8 @@ export class MdmStack extends Stack {
   public readonly fn: lambda.Function;
   /** The public Function URL installers point at. */
   public readonly functionUrl: lambda.FunctionUrl;
+  /** The private bucket the agent installers are published to. */
+  public readonly installerBucket: s3.Bucket;
 
   constructor(scope: Construct, id: string, props?: MdmStackProps) {
     super(scope, id, props);
@@ -90,6 +93,16 @@ export class MdmStack extends Stack {
       },
     });
 
+    // Private, TLS-only, versioned and retained. No `autoDeleteObjects`: that
+    // would add a custom-resource Lambda, and the installers outlive the stack.
+    this.installerBucket = new s3.Bucket(this, 'InstallerBucket', {
+      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      encryption: s3.BucketEncryption.S3_MANAGED,
+      enforceSSL: true,
+      versioned: true,
+      removalPolicy: RemovalPolicy.RETAIN,
+    });
+
     this.fn = new lambda.Function(this, 'ApiFunction', {
       runtime: lambda.Runtime.NODEJS_22_X,
       handler: 'index.handler',
@@ -102,6 +115,7 @@ export class MdmStack extends Stack {
         ENTRA_CLIENT_ID: entraClientId,
         ENTRA_ADMIN_GROUP_ID: entraAdminGroupId,
         PEPPER_SECRET_ARN: this.pepperSecret.secretArn,
+        INSTALLER_BUCKET: this.installerBucket.bucketName,
       },
     });
 
@@ -119,6 +133,22 @@ export class MdmStack extends Stack {
       }),
     );
 
+    // Written by hand rather than with `installerBucket.grantRead()`, which adds
+    // broader actions. GetObject is limited to the installers/ prefix; ListBucket
+    // lets S3 answer a missing key with 404 rather than 403.
+    this.fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:GetObject'],
+        resources: [this.installerBucket.arnForObjects('installers/*')],
+      }),
+    );
+    this.fn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ['s3:ListBucket'],
+        resources: [this.installerBucket.bucketArn],
+      }),
+    );
+
     this.functionUrl = this.fn.addFunctionUrl({
       authType: lambda.FunctionUrlAuthType.NONE,
     });
@@ -126,6 +156,11 @@ export class MdmStack extends Stack {
     new CfnOutput(this, 'CollectionUrl', {
       description: 'Collection URL the agent installers point at',
       value: this.functionUrl.url,
+    });
+
+    new CfnOutput(this, 'InstallerBucketName', {
+      description: 'Bucket scripts/publish-installers.mjs uploads the agent installers to',
+      value: this.installerBucket.bucketName,
     });
   }
 }

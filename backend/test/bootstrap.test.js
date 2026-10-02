@@ -19,6 +19,30 @@ import { resolveEnrollDependencies } from '../dist/routes/enroll.js';
 import { resolveCheckInDependencies } from '../dist/routes/checkin.js';
 import { resolvePolicyBundleDependencies } from '../dist/routes/policies.js';
 import { resolveAdminDependencies } from '../dist/admin/router.js';
+import { resolveDownloadDependencies } from '../dist/routes/downloads.js';
+import { HeadObjectCommand } from '@aws-sdk/client-s3';
+
+function completeTask023Env(overrides = {}) {
+  return {
+    TABLE_NAME: 'mdm-table',
+    PEPPER_SECRET_ARN: 'arn:secret',
+    ENTRA_TENANT_ID: 'tenant',
+    ENTRA_CLIENT_ID: 'client',
+    ...overrides,
+  };
+}
+
+function fakeFactories() {
+  return {
+    createDocumentClient: () => ({ send: async () => ({}) }),
+    createSecretsClient: () => ({ send: async () => ({ SecretString: 'pepper' }) }),
+    fetchImpl: async () => ({ status: 200, json: async () => ({ keys: [] }) }),
+  };
+}
+
+function routerRequest(path) {
+  return { method: 'GET', path, query: {}, headers: {}, body: null };
+}
 
 // ============================================================================
 // Environment Validation Tests
@@ -275,4 +299,88 @@ test('Bootstrap environment requirement order matches REQUIRED_ENV', (t) => {
     Array.from(REQUIRED_ENV),
     ['TABLE_NAME', 'PEPPER_SECRET_ARN', 'ENTRA_TENANT_ID', 'ENTRA_CLIENT_ID']
   );
+});
+
+// ============================================================================
+// TASK-025: bootstrap wires the download route from env.INSTALLER_BUCKET
+// ============================================================================
+
+test('Scenario: Bootstrap wires the download route from env.INSTALLER_BUCKET via the injected S3 factory', async (t) => {
+  // Given process.env.INSTALLER_BUCKET is unset
+  const hadEnvVar = Object.prototype.hasOwnProperty.call(process.env, 'INSTALLER_BUCKET');
+  const previous = process.env.INSTALLER_BUCKET;
+  delete process.env.INSTALLER_BUCKET;
+
+  try {
+    // And a complete TASK-023 bootstrap env with INSTALLER_BUCKET "b"
+    // And a fake createS3Client whose client's send rejects with name "NotFound"
+    const sendCalls = [];
+    const fakeS3Client = {
+      send(command) {
+        sendCalls.push(command);
+        return Promise.reject({ name: 'NotFound' });
+      },
+    };
+
+    // When bootstrap runs with fake createDocumentClient, createSecretsClient,
+    // fetchImpl and createS3Client
+    const result = await bootstrap({
+      env: completeTask023Env({ INSTALLER_BUCKET: 'b' }),
+      ...fakeFactories(),
+      createS3Client: () => fakeS3Client,
+    });
+
+    // Then bootstrap resolves
+    assert.ok(result);
+
+    // And resolveDownloadDependencies().bucket is "b"
+    assert.strictEqual(resolveDownloadDependencies().bucket, 'b');
+
+    // When the router handles GET "/downloads/windows-x64"
+    const response = await router.handle(routerRequest('/downloads/windows-x64'));
+
+    // Then the status is 404 with body {"error":"installer_not_available"}
+    assert.strictEqual(response.statusCode, 404);
+    assert.deepStrictEqual(JSON.parse(response.body), { error: 'installer_not_available' });
+
+    // And the fake S3 client's send was called exactly once
+    assert.strictEqual(sendCalls.length, 1);
+
+    // And that call's command is a HeadObjectCommand whose input is
+    // {"Bucket":"b","Key":"installers/windows-x64.msi"}
+    assert.ok(sendCalls[0] instanceof HeadObjectCommand);
+    assert.deepStrictEqual(sendCalls[0].input, { Bucket: 'b', Key: 'installers/windows-x64.msi' });
+  } finally {
+    if (hadEnvVar) {
+      process.env.INSTALLER_BUCKET = previous;
+    } else {
+      delete process.env.INSTALLER_BUCKET;
+    }
+  }
+});
+
+for (const { label, env } of [
+  { label: 'absent', env: completeTask023Env() },
+  { label: 'set to ""', env: completeTask023Env({ INSTALLER_BUCKET: '' }) },
+]) {
+  test(`Scenario Outline: Missing or empty INSTALLER_BUCKET does not stop bootstrap (${label})`, async (t) => {
+    // Given a complete TASK-023 bootstrap env with INSTALLER_BUCKET <state>
+    // When bootstrap runs with fake factories
+    const result = await bootstrap({ env, ...fakeFactories() }).catch((e) => e);
+
+    // Then bootstrap resolves and does not reject with "missing environment
+    // variable INSTALLER_BUCKET"
+    assert.ok(!(result instanceof Error), `bootstrap should resolve, got ${result?.message}`);
+
+    // When the router handles GET "/downloads/windows-x64"
+    const response = await router.handle(routerRequest('/downloads/windows-x64'));
+
+    // Then the status is 500 with body {"error":"not_configured"}
+    assert.strictEqual(response.statusCode, 500);
+    assert.deepStrictEqual(JSON.parse(response.body), { error: 'not_configured' });
+  });
+}
+
+test('Unit: INSTALLER_BUCKET is not among the required-variable names', (t) => {
+  assert.ok(!Array.from(REQUIRED_ENV).includes('INSTALLER_BUCKET'));
 });

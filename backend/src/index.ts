@@ -14,6 +14,7 @@ import { registerAuditRoutes, resolveAdminDependencies } from './admin/router.js
 import { createRouter, type Router, type RouterRequest, type RouterResponse } from './http/router.js';
 import { registerCheckInRoute, resolveCheckInDependencies } from './routes/checkin.js';
 import { registerCommandRoutes, type CommandRouteDeps } from './routes/commands.js';
+import { registerDownloadRoute, resolveDownloadDependencies } from './routes/downloads.js';
 import { registerPolicyBundleRoute, resolvePolicyBundleDependencies } from './routes/policies.js';
 
 import { registerEnrollRoute, resolveEnrollDependencies } from './routes/enroll.js';
@@ -305,6 +306,26 @@ export {
   registerAgentReleaseRoutes,
 } from './admin/agentRelease.js';
 // --- end TASK-022 ----------------------------------------------------------
+
+// --- TASK-025: GET /downloads/{platform} -------------------------------------
+// Public, outside both the device HMAC scheme and the admin token verifier: the
+// landing page's download links. Dependencies are resolved per request so no
+// S3 client is constructed at import time; start-up calls
+// `configureDownloadRoute({ bucket, installers })`.
+registerDownloadRoute(router, resolveDownloadDependencies);
+export {
+  DOWNLOAD_PATH,
+  DOWNLOAD_PLATFORMS,
+  DOWNLOAD_URL_TTL_SECONDS,
+  configureDownloadRoute,
+  createDownloadHandler,
+  installerKey,
+  isDownloadPlatform,
+  registerDownloadRoute,
+  resolveDownloadDependencies,
+} from './routes/downloads.js';
+export type { DownloadDependencies, DownloadPlatform, InstallerStore } from './routes/downloads.js';
+// --- end TASK-025 ----------------------------------------------------------
 
 function parseQuery(rawQueryString: string | undefined): Record<string, string> {
   const query: Record<string, string> = {};

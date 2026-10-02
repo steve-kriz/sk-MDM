@@ -198,13 +198,13 @@ test('E2E: Scenario: Role policy is scoped to the table and the one secret', asy
       `No statement should use Resource "*"`
     );
 
-    // Check that only DynamoDB and SecretsManager are mentioned
+    // Check that only DynamoDB, SecretsManager and S3 are mentioned
     const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
     for (const action of actions) {
       const service = action.split(':')[0];
       assert.ok(
-        ['dynamodb', 'secretsmanager'].includes(service),
-        `Only dynamodb and secretsmanager services allowed, found: ${service}`
+        ['dynamodb', 'secretsmanager', 's3'].includes(service),
+        `Only dynamodb, secretsmanager and s3 services allowed, found: ${service}`
       );
     }
   }
@@ -507,4 +507,180 @@ test('Unit: Only one Lambda Function URL exists', async (t) => {
   const { template } = createTestStack();
   const urls = template.findResources('AWS::Lambda::Url');
   assert.strictEqual(Object.keys(urls).length, 1, 'Should have exactly one Lambda Function URL');
+});
+
+// ============================================================================
+// TASK-025: Installer downloads from S3
+// ============================================================================
+
+test('E2E: Scenario: Installer bucket is private, encrypted, versioned and retained', async (t) => {
+  // Given a synthesised MdmStack template
+  const { template } = createTestStack();
+
+  // Then the template contains exactly one AWS::S3::Bucket
+  const buckets = template.findResources('AWS::S3::Bucket');
+  const bucketIds = Object.keys(buckets);
+  assert.strictEqual(bucketIds.length, 1, 'Should have exactly one S3 bucket');
+  const bucket = buckets[bucketIds[0]];
+
+  // And its PublicAccessBlockConfiguration has all four flags true
+  assert.deepStrictEqual(bucket.Properties.PublicAccessBlockConfiguration, {
+    BlockPublicAcls: true,
+    BlockPublicPolicy: true,
+    IgnorePublicAcls: true,
+    RestrictPublicBuckets: true,
+  });
+
+  // And its BucketEncryption uses SSEAlgorithm "AES256"
+  const rule = bucket.Properties.BucketEncryption.ServerSideEncryptionConfiguration[0];
+  assert.strictEqual(rule.ServerSideEncryptionByDefault.SSEAlgorithm, 'AES256');
+
+  // And its VersioningConfiguration Status is "Enabled"
+  assert.strictEqual(bucket.Properties.VersioningConfiguration.Status, 'Enabled');
+
+  // And its DeletionPolicy and UpdateReplacePolicy are "Retain"
+  assert.strictEqual(bucket.DeletionPolicy, 'Retain');
+  assert.strictEqual(bucket.UpdateReplacePolicy, 'Retain');
+});
+
+test('E2E: Scenario: Bucket refuses plaintext transport', async (t) => {
+  // Given a synthesised MdmStack template
+  const { template } = createTestStack();
+
+  // Then an AWS::S3::BucketPolicy on the bucket has a Deny statement with
+  // condition aws:SecureTransport "false"
+  const policies = template.findResources('AWS::S3::BucketPolicy');
+  const policyIds = Object.keys(policies);
+  assert.ok(policyIds.length >= 1, 'Should have at least one bucket policy');
+
+  const denyStatements = policyIds
+    .flatMap((id) => policies[id].Properties.PolicyDocument.Statement)
+    .filter((statement) => statement.Effect === 'Deny');
+
+  const secureTransportDeny = denyStatements.find((statement) => {
+    const condition = statement.Condition?.Bool ?? statement.Condition?.['Bool'];
+    return condition && condition['aws:SecureTransport'] === 'false';
+  });
+  assert.ok(secureTransportDeny, 'Should have a Deny statement conditioned on aws:SecureTransport false');
+});
+
+test('E2E: Scenario: Lambda is told the bucket name by reference', async (t) => {
+  // Given a synthesised MdmStack template
+  const { template } = createTestStack();
+
+  // Then the Lambda environment variable INSTALLER_BUCKET is a Ref to the installer bucket
+  const lambdaResources = template.findResources('AWS::Lambda::Function');
+  const lambdaResourceValue = Object.values(lambdaResources)[0];
+  const env = lambdaResourceValue.Properties.Environment.Variables;
+
+  assert.ok(env.INSTALLER_BUCKET, 'INSTALLER_BUCKET should be defined');
+  assert.ok(
+    typeof env.INSTALLER_BUCKET === 'object' && env.INSTALLER_BUCKET.Ref,
+    'INSTALLER_BUCKET should be a Ref, not a literal string'
+  );
+
+  const bucketLogicalId = env.INSTALLER_BUCKET.Ref;
+  const buckets = template.findResources('AWS::S3::Bucket');
+  assert.ok(bucketLogicalId in buckets, 'INSTALLER_BUCKET Ref should point at the installer bucket resource');
+});
+
+test('E2E: Scenario: Lambda can only read installers and list the bucket', async (t) => {
+  // Given the Lambda execution role policy
+  const { template } = createTestStack();
+
+  const buckets = template.findResources('AWS::S3::Bucket');
+  const bucketLogicalId = Object.keys(buckets)[0];
+
+  const iamPolicies = template.findResources('AWS::IAM::Policy');
+  const inlinePolicyStatements = Object.values(iamPolicies).flatMap(
+    (policy) => policy.Properties.PolicyDocument.Statement
+  );
+
+  function actionsOf(statement) {
+    return Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+  }
+
+  function resourcesOf(statement) {
+    return Array.isArray(statement.Resource) ? statement.Resource : [statement.Resource];
+  }
+
+  // Then exactly one role policy statement allows "s3:GetObject" on the bucket
+  // ARN joined with "/installers/*"
+  const getObjectStatements = inlinePolicyStatements.filter(
+    (s) => actionsOf(s).length === 1 && actionsOf(s)[0] === 's3:GetObject'
+  );
+  assert.strictEqual(getObjectStatements.length, 1, 'Should have exactly one s3:GetObject statement');
+  const getObjectResources = resourcesOf(getObjectStatements[0]);
+  assert.strictEqual(getObjectResources.length, 1);
+  const getObjectResource = getObjectResources[0];
+  assert.ok(
+    typeof getObjectResource === 'object' && getObjectResource['Fn::Join'],
+    'GetObject resource should be the bucket ARN joined with /installers/*'
+  );
+  const joinParts = getObjectResource['Fn::Join'][1];
+  assert.ok(joinParts.some((part) => typeof part === 'string' && part.includes('/installers/*')));
+  assert.ok(
+    joinParts.some(
+      (part) => typeof part === 'object' && (part['Fn::GetAtt']?.[0] === bucketLogicalId || part.Ref === bucketLogicalId)
+    )
+  );
+
+  // And exactly one other S3 statement allows only "s3:ListBucket" on the bucket ARN
+  const listBucketStatements = inlinePolicyStatements.filter(
+    (s) => actionsOf(s).length === 1 && actionsOf(s)[0] === 's3:ListBucket'
+  );
+  assert.strictEqual(listBucketStatements.length, 1, 'Should have exactly one s3:ListBucket statement');
+  const listBucketResources = resourcesOf(listBucketStatements[0]);
+  assert.strictEqual(listBucketResources.length, 1);
+  assert.ok(
+    typeof listBucketResources[0] === 'object' &&
+      (listBucketResources[0]['Fn::GetAtt']?.[0] === bucketLogicalId || listBucketResources[0].Ref === bucketLogicalId),
+    'ListBucket resource should be the bucket ARN itself'
+  );
+
+  // And no statement allows "s3:PutObject", "s3:DeleteObject" or "s3:*"
+  for (const statement of inlinePolicyStatements) {
+    const actions = actionsOf(statement);
+    assert.ok(!actions.includes('s3:PutObject'), 'No statement should allow s3:PutObject');
+    assert.ok(!actions.includes('s3:DeleteObject'), 'No statement should allow s3:DeleteObject');
+    assert.ok(!actions.includes('s3:*'), 'No statement should allow s3:*');
+  }
+
+  // And no statement uses Resource "*"
+  for (const statement of inlinePolicyStatements) {
+    const resources = resourcesOf(statement);
+    assert.ok(!resources.includes('*'), 'No statement should use Resource "*"');
+  }
+});
+
+test('E2E: Scenario: Bucket name is a stack output', async (t) => {
+  // Given a synthesised MdmStack template
+  const { template } = createTestStack();
+
+  // Then an output named "InstallerBucketName" is a Ref to the installer bucket
+  const outputs = template.findOutputs('InstallerBucketName');
+  assert.ok(outputs.InstallerBucketName, 'InstallerBucketName output should exist');
+  const value = outputs.InstallerBucketName.Value;
+  assert.ok(typeof value === 'object' && value.Ref, 'InstallerBucketName should be a Ref');
+
+  const buckets = template.findResources('AWS::S3::Bucket');
+  assert.ok(value.Ref in buckets, 'InstallerBucketName should Ref the installer bucket resource');
+});
+
+test('E2E: Scenario: No custom-resource Lambda is introduced', async (t) => {
+  // Given a synthesised MdmStack template
+  const { template } = createTestStack();
+
+  // Then the template contains exactly one AWS::Lambda::Function
+  const functions = template.findResources('AWS::Lambda::Function');
+  assert.strictEqual(Object.keys(functions).length, 1, 'Should have exactly one Lambda function');
+});
+
+test('Unit: MdmStack exposes an installerBucket property', async (t) => {
+  const app = new App();
+  const stack = new MdmStack(app, 'MdmStack', {
+    entraTenantId: 'test-tenant',
+    entraClientId: 'test-client',
+  });
+  assert.ok(stack.installerBucket, 'installerBucket should be defined');
 });
