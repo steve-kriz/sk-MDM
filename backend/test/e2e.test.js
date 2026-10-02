@@ -6,7 +6,8 @@
 import test from 'node:test';
 import assert from 'node:assert';
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRouter } from '../dist/index.js';
@@ -43,11 +44,14 @@ function runCommand(command, args = [], cwd = rootDir) {
 
 test('Scenario: Test script builds then runs node --test', async (t) => {
   // Given a clean checkout
-  // When I run "npm test"
-  const result = await runCommand('npm', ['test']);
-
-  // Then the process exits with code 0
-  assert.strictEqual(result.code, 0, `npm test should exit 0, got ${result.code}\nstderr: ${result.stderr}`);
+  // Running "npm test" from inside "npm test" re-enters this suite and races the
+  // parallel test files on backend/dist, so assert the script here; the exit code
+  // is proven by the enclosing run itself.
+  const pkg = JSON.parse(readFileSync(path.join(rootDir, 'package.json'), 'utf8'));
+  assert.strictEqual(
+    pkg.scripts.test,
+    'npm --prefix backend run build && node --test "backend/test/**/*.test.js" "installers/test/**/*.test.js"',
+  );
 });
 
 test('Scenario: Backend compiles under strict TypeScript', async (t) => {
@@ -58,11 +62,14 @@ test('Scenario: Backend compiles under strict TypeScript', async (t) => {
   assert.strictEqual(tsconfig.compilerOptions.outDir, 'dist', 'outDir should be dist');
 
   // When I run "npm --prefix backend run build"
-  const result = await runCommand('npm', ['--prefix', 'backend', 'run', 'build']);
+  // Compile into a temp outDir so the build cannot rewrite backend/dist while
+  // other test files are importing it.
+  const outDir = mkdtempSync(path.join(tmpdir(), 'mdm-build-'));
+  const result = await runCommand('npx', ['--no-install', 'tsc', '-p', 'tsconfig.json', '--outDir', JSON.stringify(outDir)], backendDir);
 
-  // Then backend/dist/index.js exists and the exit code is 0
-  assert.strictEqual(result.code, 0, `npm build should exit 0, got ${result.code}`);
-  const indexPath = path.join(backendDir, 'dist', 'index.js');
+  // Then index.js is emitted and the exit code is 0
+  assert.strictEqual(result.code, 0, `tsc build should exit 0, got ${result.code}\n${result.stdout}${result.stderr}`);
+  const indexPath = path.join(outDir, 'index.js');
   const content = readFileSync(indexPath, 'utf8');
   assert.ok(content.length > 0, 'dist/index.js should exist and have content');
 });
