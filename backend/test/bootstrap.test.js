@@ -276,3 +276,139 @@ test('Bootstrap environment requirement order matches REQUIRED_ENV', (t) => {
     ['TABLE_NAME', 'PEPPER_SECRET_ARN', 'ENTRA_TENANT_ID', 'ENTRA_CLIENT_ID']
   );
 });
+
+// ============================================================================
+// TASK-027: bootstrap wires the Graph directory into the admin routes (AC26)
+// ============================================================================
+
+test('AC26: bootstrap wires graph into admin routes, reusing the pepper secrets client and sending no Graph request', async (t) => {
+  const secretsSends = [];
+  const fakeSecretsClient = {
+    send(cmd) {
+      secretsSends.push(cmd);
+      return Promise.resolve({ SecretString: 'pepper-src' });
+    },
+  };
+  const fetchCalls = [];
+  const fakeFetch = async (url, init) => {
+    fetchCalls.push(url);
+    return { status: 200, json: async () => ({ keys: [] }) };
+  };
+  let secretsClientFactoryCalls = 0;
+
+  await bootstrap({
+    env: {
+      TABLE_NAME: 'table',
+      PEPPER_SECRET_ARN: 'arn:secret',
+      ENTRA_TENANT_ID: 't-1',
+      ENTRA_CLIENT_ID: 'c-1',
+      GRAPH_SECRET_ID: 'prod/sk-mdm',
+    },
+    createDocumentClient: () => ({ send: async () => ({}) }),
+    createSecretsClient: () => {
+      secretsClientFactoryCalls += 1;
+      return fakeSecretsClient;
+    },
+    fetchImpl: fakeFetch,
+  });
+
+  const adminDeps = resolveAdminDependencies();
+  assert.ok(adminDeps.graph, 'resolveAdminDependencies().graph should be defined');
+
+  assert.strictEqual(secretsClientFactoryCalls, 1, 'createSecretsClient should be called exactly once');
+  assert.strictEqual(secretsSends.length, 1, 'the secrets client should have been sent exactly once (the pepper read)');
+
+  const graphCalls = fetchCalls.filter(
+    (url) => url.startsWith('https://graph.microsoft.com/') || url.endsWith('/oauth2/v2.0/token'),
+  );
+  assert.strictEqual(graphCalls.length, 0, 'building the directory should send no Graph or token request');
+
+  // The new routes are registered on the router exported by backend/src/index.ts.
+  const deviceRefresh = await router.handle({
+    method: 'POST',
+    path: '/admin/api/v1/devices/d1/user-link/refresh',
+    query: {},
+    headers: {},
+    body: null,
+  });
+  assert.notStrictEqual(deviceRefresh.statusCode, 404, 'the per-device user-link route should be registered');
+
+  const bulkRefresh = await router.handle({
+    method: 'POST',
+    path: '/admin/api/v1/user-links/refresh',
+    query: {},
+    headers: {},
+    body: null,
+  });
+  assert.notStrictEqual(bulkRefresh.statusCode, 404, 'the bulk user-link route should be registered');
+});
+
+test('AC26 (edge): an absent GRAPH_SECRET_ID leaves graph undefined and sends no Graph or token request', async (t) => {
+  const secretsSends = [];
+  const fakeSecretsClient = {
+    send(cmd) {
+      secretsSends.push(cmd);
+      return Promise.resolve({ SecretString: 'pepper-src' });
+    },
+  };
+  const fetchCalls = [];
+  const fakeFetch = async (url) => {
+    fetchCalls.push(url);
+    return { status: 200, json: async () => ({ keys: [] }) };
+  };
+
+  await bootstrap({
+    env: {
+      TABLE_NAME: 'table',
+      PEPPER_SECRET_ARN: 'arn:secret',
+      ENTRA_TENANT_ID: 't-1',
+      ENTRA_CLIENT_ID: 'c-1',
+      // GRAPH_SECRET_ID is absent.
+    },
+    createDocumentClient: () => ({ send: async () => ({}) }),
+    createSecretsClient: () => fakeSecretsClient,
+    fetchImpl: fakeFetch,
+  });
+
+  assert.strictEqual(resolveAdminDependencies().graph, undefined);
+  assert.strictEqual(secretsSends.length, 1);
+  const graphCalls = fetchCalls.filter(
+    (url) => url.startsWith('https://graph.microsoft.com/') || url.endsWith('/oauth2/v2.0/token'),
+  );
+  assert.strictEqual(graphCalls.length, 0);
+});
+
+test('AC26 (edge): an empty GRAPH_SECRET_ID leaves graph undefined and sends no Graph or token request', async (t) => {
+  const secretsSends = [];
+  const fakeSecretsClient = {
+    send(cmd) {
+      secretsSends.push(cmd);
+      return Promise.resolve({ SecretString: 'pepper-src' });
+    },
+  };
+  const fetchCalls = [];
+  const fakeFetch = async (url) => {
+    fetchCalls.push(url);
+    return { status: 200, json: async () => ({ keys: [] }) };
+  };
+
+  await bootstrap({
+    env: {
+      TABLE_NAME: 'table',
+      PEPPER_SECRET_ARN: 'arn:secret',
+      ENTRA_TENANT_ID: 't-1',
+      ENTRA_CLIENT_ID: 'c-1',
+      GRAPH_SECRET_ID: '',
+    },
+    createDocumentClient: () => ({ send: async () => ({}) }),
+    createSecretsClient: () => fakeSecretsClient,
+    fetchImpl: fakeFetch,
+  });
+
+  assert.strictEqual(resolveAdminDependencies().graph, undefined);
+  assert.strictEqual(secretsSends.length, 1);
+  const graphCalls = fetchCalls.filter(
+    (url) => url.startsWith('https://graph.microsoft.com/') || url.endsWith('/oauth2/v2.0/token'),
+  );
+  assert.strictEqual(graphCalls.length, 0);
+});
