@@ -18,13 +18,16 @@
 package contract
 
 // EnrollRequest is the body of POST /api/v1/enroll.
+//
+// HardwareUUID is the stable hardware identifier — the machine UUID on
+// Windows and the hardware UUID on macOS — and is what lets the backend
+// recognise a device that enrolls a second time after a re-install.
 type EnrollRequest struct {
 	Hostname     string `json:"hostname"`
-	Platform     string `json:"platform"` // "windows" or "macos"
+	Platform     string `json:"platform"` // "windows" or "darwin"
 	OSVersion    string `json:"osVersion"`
+	HardwareUUID string `json:"hardwareUuid"`
 	AgentVersion string `json:"agentVersion"`
-	SerialNumber string `json:"serialNumber"`
-	EnrolledAt   string `json:"enrolledAt"` // ISO-8601 UTC
 }
 
 // EnrollResponse is the body of a successful POST /api/v1/enroll. It carries

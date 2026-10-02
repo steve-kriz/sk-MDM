@@ -329,10 +329,19 @@ func (r *CommandRunner) Calls() []Command {
 
 // Clock is a manually driven platform.Clock: it never advances on its own, so
 // a test that waits on an interval is instantaneous and never flaky.
+//
+// Every duration passed to After is recorded, so a test can assert on the
+// backoff a retry loop slept through without timing anything.
 type Clock struct {
 	mu     sync.Mutex
 	now    time.Time
 	timers []*timer
+	waits  []time.Duration
+
+	// AutoAdvance makes After move the clock forward by d and fire at once,
+	// instead of waiting for Advance. It is how a single-goroutine test
+	// drives a retry loop to completion; the waits are still recorded.
+	AutoAdvance bool
 }
 
 type timer struct {
@@ -353,18 +362,38 @@ func (c *Clock) Now() time.Time {
 }
 
 // After returns a channel that fires once Advance has moved the clock d past
-// the moment of the call. A non-positive d fires immediately.
+// the moment of the call. A non-positive d fires immediately. With
+// AutoAdvance set, the clock moves itself forward by d and the channel is
+// already fired when it comes back.
 func (c *Clock) After(d time.Duration) <-chan time.Time {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
+	c.waits = append(c.waits, d)
+	auto := c.AutoAdvance
 	ch := make(chan time.Time, 1)
+
 	if d <= 0 {
 		ch <- c.now
+		c.mu.Unlock()
 		return ch
 	}
+	if auto {
+		c.mu.Unlock()
+		c.Advance(d)
+		ch <- c.Now()
+		return ch
+	}
+
 	c.timers = append(c.timers, &timer{at: c.now.Add(d), ch: ch})
+	c.mu.Unlock()
 	return ch
+}
+
+// Waits returns every duration After was asked for, in order: the sleeps the
+// code under test performed.
+func (c *Clock) Waits() []time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]time.Duration(nil), c.waits...)
 }
 
 // Advance moves the clock forward and fires every timer that has come due.

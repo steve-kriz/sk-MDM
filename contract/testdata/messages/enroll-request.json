@@ -2,7 +2,6 @@
   "hostname": "LAT-7440-JH4K7Z2",
   "platform": "windows",
   "osVersion": "10.0.22631",
-  "agentVersion": "0.0.0-dev",
-  "serialNumber": "JH4K7Z2",
-  "enrolledAt": "2026-10-02T07:14:55Z"
+  "hardwareUuid": "4C4C4544-0048-4A10-8052-B7C04F5A325A",
+  "agentVersion": "0.0.0-dev"
 }
