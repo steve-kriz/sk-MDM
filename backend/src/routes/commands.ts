@@ -26,6 +26,7 @@
  * lapsed, so two concurrent polls cannot both win the same command and a
  * crashed agent's work returns to the queue when its lease expires.
  */
+import type { Command, CommandLeaseResponse, CommandResultRequest } from '../contract/types.js';
 import { deviceCommand, type TableKey } from '../db/keys.js';
 import { CONDITIONAL_CHECK_FAILED, type Item, type QueryPage, type QueryRequest, type RequestFields, type WriteOutcome } from '../db/table.js';
 import { verifyDeviceRequest, type DeviceAuthResult, type EpochSecondsClock } from '../http/deviceAuth.js';
@@ -51,7 +52,7 @@ export const LEASED_STATUS = 'leased';
 export const EXPIRED_STATUS = 'expired';
 
 /** The terminal statuses a result may report, and that a stored command may already hold. */
-export const TERMINAL_STATUSES = ['succeeded', 'failed'] as const;
+export const TERMINAL_STATUSES: readonly CommandResultRequest['status'][] = ['succeeded', 'failed'];
 
 /**
  * The condition a command item must satisfy to be leased: it is waiting, or
@@ -99,15 +100,6 @@ export interface CommandRouteDeps {
 
 /** Dependencies, or a function resolving them when the request arrives. */
 export type CommandRouteDepsSource = CommandRouteDeps | (() => CommandRouteDeps);
-
-/** One command as the agent sees it. `issuedAt` and `expiresAt` are epoch milliseconds. */
-export interface LeasedCommand {
-  commandId: string;
-  type: string;
-  payload: unknown;
-  issuedAt: unknown;
-  expiresAt: unknown;
-}
 
 function jsonError(statusCode: number, error: string, extra?: Record<string, unknown>): RouteResult {
   return { statusCode, body: { error, ...(extra ?? {}) } };
@@ -180,7 +172,7 @@ function hasExpired(item: Item, nowSeconds: number): boolean {
 
 /** True when the stored command has already reported an outcome. */
 function isFinished(item: Item): boolean {
-  return TERMINAL_STATUSES.includes(item.status as (typeof TERMINAL_STATUSES)[number]);
+  return TERMINAL_STATUSES.includes(item.status as CommandResultRequest['status']);
 }
 
 /**
@@ -280,7 +272,7 @@ export function createLeaseHandler(source: CommandRouteDepsSource) {
       ExpressionAttributeValues: { ':pk': pk, ':commandPrefix': commandPrefix },
     });
 
-    const commands: LeasedCommand[] = [];
+    const commands: Command[] = [];
     for (const item of page.items) {
       if (commands.length >= max) {
         break;
@@ -308,16 +300,19 @@ export function createLeaseHandler(source: CommandRouteDepsSource) {
         continue;
       }
 
+      // Both instants are echoed exactly as the queue stored them, which is
+      // where their epoch-milliseconds unit is decided.
       commands.push({
         commandId,
         type: typeof item.type === 'string' ? item.type : '',
-        payload: item.payload ?? {},
-        issuedAt: item.issuedAt,
-        expiresAt: item.expiresAt,
+        payload: (item.payload ?? {}) as Record<string, unknown>,
+        issuedAt: item.issuedAt as number,
+        expiresAt: item.expiresAt as number,
       });
     }
 
-    return { statusCode: 200, body: { commands } };
+    const body: CommandLeaseResponse = { commands };
+    return { statusCode: 200, body };
   };
 }
 
@@ -377,12 +372,18 @@ export function createResultHandler(source: CommandRouteDepsSource) {
     // 1. The body, before the device is authenticated and before any lookup:
     // a malformed result is a malformed request whatever it names.
     const body = parseBody(req.body) ?? {};
-    const status = body.status;
     const fields = offendingFields(body);
-    const statusValid = TERMINAL_STATUSES.includes(status as (typeof TERMINAL_STATUSES)[number]);
+    const statusValid = TERMINAL_STATUSES.includes(body.status as CommandResultRequest['status']);
     if (!statusValid || fields.length > 0) {
       return jsonError(400, 'invalid_request', fields.length > 0 ? { fields } : undefined);
     }
+    // Every field is now known to be present and of the contract's type.
+    const posted: CommandResultRequest = {
+      status: body.status as CommandResultRequest['status'],
+      exitCode: body.exitCode as number,
+      output: body.output as string,
+      finishedAt: body.finishedAt as number,
+    };
 
     // 2. The device the path names.
     const authorised = await authoriseDevice(req, deps);
@@ -419,10 +420,10 @@ export function createResultHandler(source: CommandRouteDepsSource) {
         'SET #status = :status, #output = :output, exitCode = :exitCode, finishedAt = :finishedAt',
       ExpressionAttributeNames: { '#status': 'status', '#output': 'output' },
       ExpressionAttributeValues: {
-        ':status': status,
-        ':output': truncateOutput(body.output as string),
-        ':exitCode': body.exitCode,
-        ':finishedAt': body.finishedAt,
+        ':status': posted.status,
+        ':output': truncateOutput(posted.output),
+        ':exitCode': posted.exitCode,
+        ':finishedAt': posted.finishedAt,
       },
     });
 

@@ -15,7 +15,9 @@
  *
  * Timestamps written as "ISO-8601 UTC" are strings such as
  * `2026-10-02T07:15:00Z`. Timestamps used by the signing scheme are integer
- * epoch seconds instead.
+ * epoch seconds instead, as is a command result's `finishedAt`; a command's
+ * own `issuedAt` and `expiresAt` are integer epoch milliseconds. Each field's
+ * unit is stated on the field.
  */
 
 /** Body of `POST /api/v1/enroll`. Authenticated by `X-MDM-Enrollment-Token`. */
@@ -130,35 +132,40 @@ export interface CheckInResponse {
   pendingCommandCount: number;
 }
 
+/**
+ * One command handed to the agent by a lease.
+ *
+ * Both instants are integer epoch *milliseconds*: the queue stores them that
+ * way and the lease route echoes them unchanged. The lease itself is server-side
+ * state, so `leaseExpiresAt` is never on the wire.
+ */
+export interface Command {
+  commandId: string;
+  /** Command verb, e.g. `collect_inventory`, `restart`, `run_script`. */
+  type: string;
+  /** Command-specific arguments; opaque to the transport. */
+  payload: Record<string, unknown>;
+  /** When the backend queued the command, epoch milliseconds. */
+  issuedAt: number;
+  /** After this instant the command is never handed out again, epoch milliseconds. */
+  expiresAt: number;
+}
+
 /** Response to `GET /api/v1/devices/{deviceId}/commands`: the commands now leased to this device. */
 export interface CommandLeaseResponse {
-  deviceId: string;
-  /** When the lease was granted, ISO-8601 UTC. */
-  leasedAt: string;
-  commands: Array<{
-    commandId: string;
-    /** Command verb, e.g. `collect_inventory`, `restart`, `run_script`. */
-    type: string;
-    /** Command-specific arguments; opaque to the transport. */
-    parameters: Record<string, unknown>;
-    /** When the backend queued the command, ISO-8601 UTC. */
-    issuedAt: string;
-    /** After this time the lease may be handed to another poll, ISO-8601 UTC. */
-    leaseExpiresAt: string;
-  }>;
+  commands: Command[];
 }
 
 /** Body of `POST /api/v1/devices/{deviceId}/commands/{commandId}/result`. */
 export interface CommandResultRequest {
-  commandId: string;
   /** Terminal outcome of the command. */
   status: 'succeeded' | 'failed';
-  /** When the agent finished the command, ISO-8601 UTC. */
-  completedAt: string;
   /** Process exit code, or 0 for commands with no process. */
   exitCode: number;
-  /** Combined stdout/stderr, truncated by the agent. Carries the failure text when `status` is `failed`. */
+  /** Combined stdout/stderr. The backend keeps the first 8192 bytes and drops the rest. */
   output: string;
+  /** When the agent finished the command, epoch seconds. */
+  finishedAt: number;
 }
 
 /** Response to `GET /api/v1/devices/{deviceId}/policies`: the merged policy bundle. */
