@@ -409,6 +409,152 @@ test('Unit - all view modules do not reference fetch', async (t) => {
   }
 });
 
+// ============================================================================
+// TASK-027: user links -- devices.js (AC22), deviceDetail.js (AC24), app.js (AC23)
+// ============================================================================
+
+// Imported before any test sets globalThis.document, so app.js's own
+// `if (typeof document !== 'undefined') { void start(); }` guard sees no
+// `document` and does not auto-start the console while this file loads.
+const appModule = await import('../../dist/ui/public/app.js');
+const apiModule = await import('../../dist/ui/public/api.js');
+
+test('AC22: COLUMNS carries primaryUser and both an empty and a non-empty fleet show the refresh button', async (t) => {
+  assert.deepStrictEqual(devicesModule.COLUMNS, [
+    'hostname',
+    'primaryUser',
+    'platform',
+    'osVersion',
+    'lastSeenAt',
+    'complianceState',
+  ]);
+
+  const nonEmpty = devicesModule.render({
+    items: [{ deviceId: 'd1', hostname: 'LAT', primaryUser: 'amy@contoso.com' }],
+    cursor: null,
+  });
+  assert.ok(nonEmpty.includes('<button type="button" class="refresh-user-links">'));
+  assert.ok(nonEmpty.includes('>hostname<'));
+  assert.ok(nonEmpty.includes('>primaryUser<'));
+
+  const empty = devicesModule.render({ items: [], cursor: null });
+  assert.ok(empty.includes('No devices enrolled'));
+  assert.ok(empty.includes('<button type="button" class="refresh-user-links">'));
+});
+
+test('AC24: device detail user section shows status, resolvedAt, one user row and the refresh button', async (t) => {
+  const html = deviceDetailModule.render({
+    profile: { deviceId: 'd1' },
+    userLink: {
+      status: 'linked',
+      resolvedAt: '2026-09-21T13:46:40Z',
+      users: [{ displayName: 'Amy', userPrincipalName: 'amy@contoso.com' }],
+    },
+  });
+
+  assert.ok(html.includes('id="detail-user"'));
+  assert.ok(html.includes('>User<'));
+  assert.ok(html.includes('linked'));
+  assert.ok(html.includes('2026-09-21T13:46:40Z'));
+  assert.ok(html.includes('tr class="user"'));
+  assert.ok(html.includes('Amy'));
+  assert.ok(html.includes('amy@contoso.com'));
+  assert.ok(html.includes('class="refresh-user-link"'));
+  assert.ok(html.includes('data-device-id="d1"'));
+});
+
+test('AC24: device detail user section shows "Not resolved" when userLink is null', async (t) => {
+  const html = deviceDetailModule.render({ profile: { deviceId: 'd1' }, userLink: null });
+  const section = html.slice(html.indexOf('id="detail-user"'));
+  assert.ok(section.includes('Not resolved'));
+  assert.ok(section.includes('class="refresh-user-link"'));
+  assert.ok(section.includes('data-device-id="d1"'));
+});
+
+test('AC24 (edge): Graph-supplied display names are escaped', async (t) => {
+  const html = deviceDetailModule.render({
+    profile: { deviceId: 'd1' },
+    userLink: {
+      status: 'linked',
+      resolvedAt: '2026-09-21T13:46:40Z',
+      users: [{ displayName: '<img src=x onerror=alert(1)>', userPrincipalName: 'x@x.com' }],
+    },
+  });
+  assert.ok(html.includes('&lt;img src=x onerror=alert(1)&gt;'));
+  assert.ok(!html.includes('<img'));
+});
+
+test('AC23: refreshAllUserLinks follows the cursor until it is null', async (t) => {
+  const responses = [
+    { ok: true, data: { cursor: 'c1' } },
+    { ok: true, data: { cursor: 'c2' } },
+    { ok: true, data: { cursor: null } },
+  ];
+  const calls = [];
+  const postFn = async (path, body) => {
+    calls.push({ path, body });
+    return responses[calls.length - 1];
+  };
+
+  const result = await appModule.refreshAllUserLinks(postFn);
+
+  assert.strictEqual(calls.length, 3);
+  assert.ok(calls.every((c) => c.path === '/user-links/refresh'));
+  assert.deepStrictEqual(
+    calls.map((c) => c.body.cursor),
+    [null, 'c1', 'c2'],
+  );
+  assert.deepStrictEqual(result, { ok: true, calls: 3 });
+});
+
+test('AC23 (failure): refreshAllUserLinks stops at the first failed response', async (t) => {
+  const responses = [{ ok: true, data: { cursor: 'c1' } }, { ok: false, status: 502, data: { error: 'graph_unavailable' } }];
+  let index = 0;
+  const postFn = async () => responses[index++];
+
+  const result = await appModule.refreshAllUserLinks(postFn);
+
+  assert.deepStrictEqual(result, { ok: false, error: 'graph_unavailable' });
+  assert.strictEqual(index, 2);
+});
+
+test('AC23 (failure): refreshAllUserLinks makes at most 100 calls', async (t) => {
+  let calls = 0;
+  const postFn = async () => {
+    calls += 1;
+    return { ok: true, data: { cursor: 'again' } };
+  };
+
+  await appModule.refreshAllUserLinks(postFn);
+
+  assert.strictEqual(calls, 100);
+});
+
+test('AC23, AC24 (failure): a refresh error survives the screen reload through show({error})', async (t) => {
+  apiModule.configureApi({
+    fetch: async () => ({ status: 200, json: async () => ({ items: [], cursor: null }) }),
+  });
+
+  const mount = { innerHTML: '' };
+  globalThis.window = {
+    location: { hash: '#/devices', search: '', origin: 'https://admin.example.com' },
+    history: { replaceState() {} },
+    addEventListener() {},
+  };
+  globalThis.document = { getElementById: (id) => (id === 'app' ? mount : null) };
+
+  try {
+    await appModule.show({ error: 'graph_forbidden' });
+    assert.ok(mount.innerHTML.includes('<p class="error">graph_forbidden</p>'));
+
+    await appModule.show();
+    assert.ok(!mount.innerHTML.includes('<p class="error">'));
+  } finally {
+    delete globalThis.window;
+    delete globalThis.document;
+  }
+});
+
 test('Unit - policy settings restricted to allowed keys', async (t) => {
   const state = {
     name: 'Policy 1',

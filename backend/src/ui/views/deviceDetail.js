@@ -47,6 +47,40 @@ function commandRow(command) {
   return `<tr class="command" data-command-id="${escapeHtml(command.commandId)}">${cells}</tr>`;
 }
 
+/** One registered user of the device. */
+function userRow(user) {
+  return [
+    '<tr class="user">',
+    `<td class="col-displayName">${cell(user?.displayName)}</td>`,
+    `<td class="col-userPrincipalName">${cell(user?.userPrincipalName)}</td>`,
+    '</tr>',
+  ].join('');
+}
+
+/** The Entra user(s) linked to the device, and the button that re-resolves them. */
+function userSection(userLink, deviceId) {
+  const button = `<button type="button" class="refresh-user-link" data-device-id="${escapeHtml(deviceId)}">Refresh user link</button>`;
+  if (userLink === null || userLink === undefined) {
+    return `<section class="panel" id="detail-user"><h3>User</h3><p class="empty">Not resolved</p>${button}</section>`;
+  }
+  const users = Array.isArray(userLink.users) ? userLink.users : [];
+  return [
+    '<section class="panel" id="detail-user"><h3>User</h3>',
+    field('status', cell(userLink.status)),
+    field('resolvedAt', cell(userLink.resolvedAt)),
+    users.length === 0
+      ? ''
+      : [
+          '<table class="grid users">',
+          '<thead><tr><th>displayName</th><th>userPrincipalName</th></tr></thead>',
+          `<tbody>${users.map(userRow).join('')}</tbody>`,
+          '</table>',
+        ].join(''),
+    button,
+    '</section>',
+  ].join('');
+}
+
 /** The device detail screen. */
 export function render(state = {}) {
   const profile = state.profile ?? {};
@@ -98,6 +132,7 @@ export function render(state = {}) {
     `<section class="screen" id="screen-device-detail" data-device-id="${escapeHtml(profile.deviceId ?? state.deviceId)}">`,
     `<h2>${cell(profile.hostname ?? profile.deviceId ?? state.deviceId)}</h2>`,
     profileSection,
+    userSection(state.userLink, profile.deviceId ?? state.deviceId),
     inventorySection,
     postureSection,
     commandsSection,

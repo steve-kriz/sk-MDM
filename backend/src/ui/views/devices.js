@@ -11,7 +11,11 @@
 import { cell, escapeHtml } from '../public/html.js';
 
 /** The columns a row shows, in order. */
-export const COLUMNS = ['hostname', 'platform', 'osVersion', 'lastSeenAt', 'complianceState'];
+export const COLUMNS = ['hostname', 'primaryUser', 'platform', 'osVersion', 'lastSeenAt', 'complianceState'];
+
+/** Re-resolves every device's Entra user through Graph, a page at a time. */
+export const REFRESH_USER_LINKS_BUTTON =
+  '<button type="button" class="refresh-user-links">Refresh user links</button>';
 
 /** What an empty fleet reads as. */
 export const EMPTY_MESSAGE = 'No devices enrolled';
@@ -40,7 +44,7 @@ export function render(state = {}) {
       ? `<button type="button" class="more" data-cursor="${escapeHtml(state.cursor)}">Load more</button>`
       : '';
 
-  return `<section class="screen" id="screen-devices"><h2>Devices</h2>${body}${more}</section>`;
+  return `<section class="screen" id="screen-devices"><h2>Devices</h2>${REFRESH_USER_LINKS_BUTTON}${body}${more}</section>`;
 }
 
 export const renderDevices = render;

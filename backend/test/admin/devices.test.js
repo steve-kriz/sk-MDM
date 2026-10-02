@@ -35,7 +35,7 @@ test('Unit: deviceSummary returns exactly seven fields', () => {
   const expected = DEVICE_SUMMARY_FIELDS.slice().sort();
 
   assert.deepStrictEqual(keys, expected);
-  assert.strictEqual(keys.length, 7);
+  assert.strictEqual(keys.length, 8);
 });
 
 // ============================================================================
@@ -291,6 +291,7 @@ test('Unit: DEVICE_SUMMARY_FIELDS defines the correct order', () => {
     'lastSeenAt',
     'complianceState',
     'agentVersion',
+    'primaryUser',
   ]);
 });
 

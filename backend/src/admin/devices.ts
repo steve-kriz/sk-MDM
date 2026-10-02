@@ -35,6 +35,7 @@ import {
   deviceListIndex,
   devicePosture,
   deviceProfile,
+  deviceUserLink,
   groupMember,
 } from '../db/keys.js';
 import type { Item, QueryPage } from '../db/table.js';
@@ -66,6 +67,7 @@ export const DEVICE_SUMMARY_FIELDS = [
   'lastSeenAt',
   'complianceState',
   'agentVersion',
+  'primaryUser',
 ] as const;
 
 /** What `complianceState` reads as until TASK-012 has written one. */
@@ -146,6 +148,8 @@ export function deviceSummary(profile: Item): Item {
     lastSeenAt: stringOrNull(profile.lastSeenAt),
     complianceState: stringOrNull(profile.complianceState) ?? UNKNOWN_COMPLIANCE,
     agentVersion: stringOrNull(profile.agentVersion),
+    // Denormalised by the user-link refresh (TASK-027); `null` until one has run.
+    primaryUser: stringOrNull(profile.primaryUserUpn),
   };
 }
 
@@ -208,7 +212,7 @@ function byIssuedAtDescending(left: Item, right: Item): number {
 }
 
 /** Newest check-in first; a profile with no `lastSeenAt` sorts last. */
-function byLastSeenDescending(left: Item, right: Item): number {
+export function byLastSeenDescending(left: Item, right: Item): number {
   const leftSeen = stringOrNull(left.lastSeenAt);
   const rightSeen = stringOrNull(right.lastSeenAt);
   if (leftSeen === rightSeen) {
@@ -224,7 +228,7 @@ function byLastSeenDescending(left: Item, right: Item): number {
 }
 
 /** One page of profiles, before they are hydrated into list items. */
-interface ProfilePage {
+export interface ProfilePage {
   profiles: Item[];
   cursor: string | null;
 }
@@ -235,7 +239,7 @@ interface ProfilePage {
  * When `staleBefore` is given the key condition also bounds `gsi1sk`, so only
  * devices last seen before that instant are read.
  */
-async function listFleet(
+export async function listFleet(
   table: AdminTable,
   limit: number,
   cursor: string | null,
@@ -396,9 +400,10 @@ export const handleDeviceDetail: AdminRouteHandler = async (req, deps): Promise<
     return jsonError(404, 'not_found');
   }
 
-  const [inventory, posture] = await Promise.all([
+  const [inventory, posture, userLink] = await Promise.all([
     deps.table.get(deviceInventory(deviceId)),
     deps.table.get(devicePosture(deviceId)),
+    deps.table.get(deviceUserLink(deviceId)),
   ]);
 
   return {
@@ -408,6 +413,7 @@ export const handleDeviceDetail: AdminRouteHandler = async (req, deps): Promise<
       inventory: publicItem(inventory),
       posture: publicItem(posture),
       commands: await readCommands(deps.table, deviceId),
+      userLink: publicItem(userLink),
     },
   };
 };

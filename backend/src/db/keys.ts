@@ -60,6 +60,11 @@ export function devicePosture(deviceId: string): TableKey {
   return { pk: `DEVICE#${assertValidId(deviceId)}`, sk: 'POSTURE' };
 }
 
+/** `DEVICE#<deviceId>` / `USERLINK` -- the Entra user(s) last resolved for the device. */
+export function deviceUserLink(deviceId: string): TableKey {
+  return { pk: `DEVICE#${assertValidId(deviceId)}`, sk: 'USERLINK' };
+}
+
 /** `DEVICE#<deviceId>` / `CMD#<commandId>` -- one queued or completed command. */
 export function deviceCommand(deviceId: string, commandId: string): TableKey {
   return { pk: `DEVICE#${assertValidId(deviceId)}`, sk: `CMD#${assertValidId(commandId)}` };

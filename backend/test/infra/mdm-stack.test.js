@@ -210,6 +210,66 @@ test('E2E: Scenario: Role policy is scoped to the table and the one secret', asy
   }
 });
 
+// ============================================================================
+// TASK-027: the runtime Graph secret grant (AC25)
+// ============================================================================
+
+test('AC25: with no graph props, env carries the defaults and the single statement names both secrets', async (t) => {
+  const app = new App();
+  const stack = new MdmStack(app, 'MdmStack', { entraTenantId: 'test-tenant', entraClientId: 'test-client' });
+  const template = Template.fromStack(stack);
+
+  const lambdaResources = template.findResources('AWS::Lambda::Function');
+  const env = Object.values(lambdaResources)[0].Properties.Environment.Variables;
+  assert.strictEqual(env.GRAPH_SECRET_ID, 'prod/sk-mdm');
+  assert.strictEqual(env.GRAPH_SECRET_KEY, 'ENTRA_CLIENT_SECRET');
+
+  const iamPolicies = template.findResources('AWS::IAM::Policy');
+  const statements = Object.values(iamPolicies)[0].Properties.PolicyDocument.Statement;
+  const secretStatements = statements.filter((s) => {
+    const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+    return actions.includes('secretsmanager:GetSecretValue');
+  });
+  assert.strictEqual(secretStatements.length, 1, 'exactly one GetSecretValue statement');
+
+  const resources = secretStatements[0].Resource;
+  const resourceList = Array.isArray(resources) ? resources : [resources];
+  assert.strictEqual(resourceList.length, 2, 'the statement names the pepper secret and the Graph secret');
+  const resourceText = JSON.stringify(resourceList);
+  assert.ok(resourceText.includes(':secret:prod/sk-mdm-??????'), 'an ARN ending in the Graph secret name and random suffix');
+
+  for (const stmt of statements) {
+    const stmtResources = Array.isArray(stmt.Resource) ? stmt.Resource : [stmt.Resource];
+    assert.ok(!stmtResources.includes('*'), 'no statement should use Resource "*"');
+  }
+});
+
+test('AC25 (edge): an overridden graphSecretName and graphSecretKey flow through the env and the ARN', async (t) => {
+  const app = new App();
+  const stack = new MdmStack(app, 'MdmStack', {
+    entraTenantId: 'test-tenant',
+    entraClientId: 'test-client',
+    graphSecretName: 'dev/sk-mdm',
+    graphSecretKey: 'GRAPH_SECRET',
+  });
+  const template = Template.fromStack(stack);
+
+  const lambdaResources = template.findResources('AWS::Lambda::Function');
+  const env = Object.values(lambdaResources)[0].Properties.Environment.Variables;
+  assert.strictEqual(env.GRAPH_SECRET_ID, 'dev/sk-mdm');
+  assert.strictEqual(env.GRAPH_SECRET_KEY, 'GRAPH_SECRET');
+
+  const iamPolicies = template.findResources('AWS::IAM::Policy');
+  const statements = Object.values(iamPolicies)[0].Properties.PolicyDocument.Statement;
+  const secretStatements = statements.filter((s) => {
+    const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+    return actions.includes('secretsmanager:GetSecretValue');
+  });
+  assert.strictEqual(secretStatements.length, 1);
+  const resourceText = JSON.stringify(secretStatements[0].Resource);
+  assert.ok(resourceText.includes(':secret:dev/sk-mdm-??????'));
+});
+
 test('E2E: Scenario: Missing tenant id is rejected at synth time', async (t) => {
   // When I construct MdmStack without entraTenantId
   // Then an Error with message "entraTenantId is required" is thrown

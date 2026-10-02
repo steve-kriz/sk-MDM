@@ -28,7 +28,17 @@ export interface MdmStackProps extends StackProps {
   readonly entraClientId: string;
   /** Object id of the Entra group whose members are admins. Optional. */
   readonly entraAdminGroupId?: string;
+  /** Name of the secret holding the Graph client secret, read at runtime. Defaults to `prod/sk-mdm`. */
+  readonly graphSecretName?: string;
+  /** JSON key of the Graph client secret inside that secret. Defaults to `ENTRA_CLIENT_SECRET`. */
+  readonly graphSecretKey?: string;
 }
+
+/** The secret the Lambda reads the Graph client secret from, when none is named. */
+export const DEFAULT_GRAPH_SECRET_NAME = 'prod/sk-mdm';
+
+/** The JSON key of the Graph client secret, when none is named. */
+export const DEFAULT_GRAPH_SECRET_KEY = 'ENTRA_CLIENT_SECRET';
 
 /**
  * Directory handed to the Lambda as its code asset: the self-contained esbuild
@@ -67,6 +77,8 @@ export class MdmStack extends Stack {
     // Optional: CDK drops `undefined` from the environment map, which would
     // leave the Lambda reading `undefined`, so fall back to the empty string.
     const entraAdminGroupId = props?.entraAdminGroupId ?? '';
+    const graphSecretName = props?.graphSecretName || DEFAULT_GRAPH_SECRET_NAME;
+    const graphSecretKey = props?.graphSecretKey || DEFAULT_GRAPH_SECRET_KEY;
 
     this.table = new dynamodb.Table(this, 'Table', {
       partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
@@ -116,6 +128,8 @@ export class MdmStack extends Stack {
         ENTRA_ADMIN_GROUP_ID: entraAdminGroupId,
         PEPPER_SECRET_ARN: this.pepperSecret.secretArn,
         INSTALLER_BUCKET: this.installerBucket.bucketName,
+        GRAPH_SECRET_ID: graphSecretName,
+        GRAPH_SECRET_KEY: graphSecretKey,
       },
     });
 
@@ -125,11 +139,16 @@ export class MdmStack extends Stack {
     // Written out by hand rather than with `pepperSecret.grantRead()`: the
     // grant helper widens the statement to DescribeSecret (and to KMS when the
     // secret is encrypted with a customer key). The Lambda only ever reads the
-    // one secret's value.
+    // one secret's value. The same statement covers the secret holding the
+    // Graph client secret (TASK-027), named rather than created here; the
+    // `-??????` suffix matches the random characters Secrets Manager appends.
     this.fn.addToRolePolicy(
       new iam.PolicyStatement({
         actions: ['secretsmanager:GetSecretValue'],
-        resources: [this.pepperSecret.secretArn],
+        resources: [
+          this.pepperSecret.secretArn,
+          `arn:${this.partition}:secretsmanager:${this.region}:${this.account}:secret:${graphSecretName}-??????`,
+        ],
       }),
     );
 
