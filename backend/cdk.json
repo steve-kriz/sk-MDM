@@ -1,0 +1,8 @@
+{
+  "app": "node dist/infra/app.js",
+  "watch": {
+    "include": ["src/**/*.ts"],
+    "exclude": ["dist/**", "node_modules/**"]
+  },
+  "context": {}
+}
