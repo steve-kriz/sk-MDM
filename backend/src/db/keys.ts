@@ -65,6 +65,17 @@ export function deviceCommand(deviceId: string, commandId: string): TableKey {
   return { pk: `DEVICE#${assertValidId(deviceId)}`, sk: `CMD#${assertValidId(commandId)}` };
 }
 
+/**
+ * `HWUUID#<hardwareUuid>` / `POINTER` -- the device a hardware uuid belongs to.
+ *
+ * A re-enrolling machine presents the same hardware uuid, so this pointer item
+ * (`{pk, sk, deviceId, createdAt}`) is what re-binds it to its existing device
+ * record instead of creating a second one.
+ */
+export function deviceByHardware(hardwareUuid: string): TableKey {
+  return { pk: `HWUUID#${assertValidId(hardwareUuid)}`, sk: 'POINTER' };
+}
+
 /** `GROUP#<groupId>` / `PROFILE` -- the group's own record. */
 export function group(groupId: string): TableKey {
   return { pk: `GROUP#${assertValidId(groupId)}`, sk: 'PROFILE' };

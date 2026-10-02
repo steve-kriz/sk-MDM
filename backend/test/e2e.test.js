@@ -137,12 +137,15 @@ test('Scenario: Wrong method returns method_not_allowed', async (t) => {
 });
 
 test('Scenario: Function URL event is adapted', async (t) => {
-  // Given an event with requestContext.http.method POST, path "/api/v1/enroll", body base64 encoded and isBase64Encoded true
+  // Given an event with requestContext.http.method POST, path "/api/v1/e2e-adapter-probe",
+  // body base64 encoded and isBase64Encoded true. The probe path is registered by this test
+  // alone: "/api/v1/enroll" is now a real route on the shared router (TASK-006), so it can no
+  // longer stand in for an arbitrary path here.
   const event = {
     requestContext: {
       http: {
         method: 'POST',
-        path: '/api/v1/enroll',
+        path: '/api/v1/e2e-adapter-probe',
       },
     },
     rawQueryString: '',
@@ -154,7 +157,7 @@ test('Scenario: Function URL event is adapted', async (t) => {
   let receivedBody = null;
   // Mock the router to capture the request
   const { router: appRouter } = await import('../dist/index.js');
-  appRouter.add('POST', '/api/v1/enroll', (request) => {
+  appRouter.add('POST', '/api/v1/e2e-adapter-probe', (request) => {
     receivedBody = request.body;
     return { statusCode: 200 };
   });
