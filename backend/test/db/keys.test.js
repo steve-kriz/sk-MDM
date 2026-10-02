@@ -11,6 +11,7 @@ import {
   deviceInventory,
   devicePosture,
   deviceCommand,
+  deviceByHardware,
   group,
   groupMember,
   policy,
@@ -148,4 +149,53 @@ test('Unit: KEY_SEPARATOR is exported correctly', () => {
 
 test('Unit: GSI1_NAME is exported correctly', () => {
   assert.strictEqual(GSI1_NAME, 'gsi1');
+});
+
+test('Unit: deviceByHardware builds the correct key', () => {
+  const key = deviceByHardware('HW-1');
+  assert.deepStrictEqual(key, { pk: 'HWUUID#HW-1', sk: 'POINTER' });
+});
+
+test('Unit: deviceByHardware accepts various hardware uuid formats', () => {
+  const key1 = deviceByHardware('HW-1');
+  assert.deepStrictEqual(key1, { pk: 'HWUUID#HW-1', sk: 'POINTER' });
+
+  const key2 = deviceByHardware('uuid-12345-abcde');
+  assert.deepStrictEqual(key2, { pk: 'HWUUID#uuid-12345-abcde', sk: 'POINTER' });
+
+  const key3 = deviceByHardware('simple');
+  assert.deepStrictEqual(key3, { pk: 'HWUUID#simple', sk: 'POINTER' });
+});
+
+test('Unit: deviceByHardware rejects ids containing KEY_SEPARATOR', () => {
+  assert.throws(
+    () => deviceByHardware('bad#id'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: bad#id');
+      return true;
+    }
+  );
+});
+
+test('Unit: deviceByHardware rejects ids with multiple separators', () => {
+  assert.throws(
+    () => deviceByHardware('a#b#c'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: a#b#c');
+      return true;
+    }
+  );
+});
+
+test('E2E Scenario: Hardware pointer key shape and validation', () => {
+  const key = deviceByHardware('HW-1');
+  assert.deepStrictEqual(key, { pk: 'HWUUID#HW-1', sk: 'POINTER' });
+
+  assert.throws(
+    () => deviceByHardware('bad#id'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: bad#id');
+      return true;
+    }
+  );
 });
