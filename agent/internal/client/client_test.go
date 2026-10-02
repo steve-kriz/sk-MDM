@@ -15,6 +15,7 @@ import (
 
 	"github.com/officehq/sk-mdm/agent/internal/config"
 	"github.com/officehq/sk-mdm/agent/internal/contract"
+	"github.com/officehq/sk-mdm/agent/internal/logging"
 	"github.com/officehq/sk-mdm/agent/internal/platform/fake"
 	"github.com/officehq/sk-mdm/agent/internal/state"
 )
@@ -773,5 +774,96 @@ func TestScenario_BodyIsSignedCorrectly(t *testing.T) {
 
 	if signature != expectedSig {
 		t.Error("signature does not match expected (body not properly included)")
+	}
+}
+
+// TestScenario_SecretsStayOutOfTheLog validates that device secret and enrollment token are never logged.
+func TestScenario_SecretsStayOutOfTheLog(t *testing.T) {
+	// Given
+	fsys := fake.NewFS()
+	clock := fake.NewClock(time.Unix(1000000, 0))
+	clock.AutoAdvance = true
+	doer := fake.NewHTTPDoer()
+
+	const logPath = "/var/log/mdm/agent.log"
+	const deviceSecret = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+	const enrollmentToken = "0123456789abcdef.fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+
+	cfg := config.Config{
+		CollectionURL:   "https://api.example.com",
+		EnrollmentToken: enrollmentToken,
+	}
+	store := state.NewStore(fsys, stateFilePath)
+
+	// Create a real logger at debug level
+	logger := logging.New(fsys, clock, logPath, logging.LevelDebug, "client")
+
+	// Setup doer to fail once on enrollment, then succeed
+	enrollAttempts := 0
+	doer.DoFunc = func(req *http.Request) (*http.Response, error) {
+		path := req.URL.Path
+		if strings.Contains(path, "/enroll") {
+			enrollAttempts++
+			if enrollAttempts == 1 {
+				// First attempt fails with 500
+				return fake.Response(http.StatusInternalServerError, `{"error":"temp_error"}`), nil
+			}
+			// Second attempt succeeds
+			resp := contract.EnrollResponse{
+				DeviceID:               "device-001",
+				DeviceSecret:           deviceSecret,
+				CheckInIntervalSeconds: 900,
+			}
+			data, _ := json.Marshal(resp)
+			return fake.Response(http.StatusOK, string(data)), nil
+		}
+		// For Do calls, return 401 to trigger ErrUnauthorized
+		return fake.Response(http.StatusUnauthorized, ""), nil
+	}
+
+	client := New(cfg, store, doer, clock)
+	client.Logger = logger
+	client.Host = HostFacts{
+		Hostname:     "test-host",
+		Platform:     "windows",
+		OSVersion:    "10.0.22631",
+		HardwareUUID: "uuid-12345",
+		AgentVersion: "1.0.0",
+	}
+
+	// When: Run Enroll (will retry once and succeed)
+	err := client.Enroll(context.Background())
+	if err != nil {
+		t.Fatalf("Enroll failed: %v", err)
+	}
+
+	// And: Run Do (will get 401)
+	_, err = client.Do("GET", "/api/v1/test", nil)
+	if !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("expected ErrUnauthorized, got %v", err)
+	}
+
+	// Then: Read the log file and assert no secrets appear
+	logContent, exists := fsys.Content(logPath)
+	if !exists {
+		t.Fatal("log file was not created")
+	}
+
+	logText := string(logContent)
+	secretParts := []string{
+		deviceSecret,
+		enrollmentToken,
+		"fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210", // token secret half
+	}
+
+	for _, secret := range secretParts {
+		if strings.Contains(logText, secret) {
+			t.Errorf("log file contains secret: %q\nLog content:\n%s", secret, logText)
+		}
+	}
+
+	// Verify that some logging did occur (at least enrollment and request messages)
+	if !strings.Contains(logText, "enrolled") && !strings.Contains(logText, "enrollment") {
+		t.Error("log file should contain enrollment-related messages")
 	}
 }
