@@ -26,6 +26,7 @@ export const SETTING_KEYS = [
   'localAdminAllowlist',
   'firewallBlockedDomains',
   'firewallAllowedDomains',
+  'antivirusEnabled',
 ];
 
 /** The keys whose values are lists typed as text. */
@@ -96,7 +97,7 @@ export function settingsOf(state = {}) {
     if (value === undefined || value === null || value === '') {
       continue;
     }
-    if (key === 'firewallEnabled' || key === 'diskEncryptionRequired') {
+    if (key === 'firewallEnabled' || key === 'diskEncryptionRequired' || key === 'antivirusEnabled') {
       settings[key] = value === true || value === 'true';
       continue;
     }
@@ -219,6 +220,10 @@ export function render(state = {}) {
     '<label for="disk-encryption-required">diskEncryptionRequired</label>',
     `<input id="disk-encryption-required" name="diskEncryptionRequired" type="checkbox"${attributes({
       checked: settings.diskEncryptionRequired === true,
+    })}>`,
+    '<label for="antivirus-enabled">antivirusEnabled</label>',
+    `<input id="antivirus-enabled" name="antivirusEnabled" type="checkbox"${attributes({
+      checked: settings.antivirusEnabled === true,
     })}>`,
     '<label for="screen-lock">screenLockTimeoutSeconds</label>',
     `<input id="screen-lock" name="screenLockTimeoutSeconds" type="number" min="${SCREEN_LOCK_TIMEOUT_SECONDS.min}" max="${SCREEN_LOCK_TIMEOUT_SECONDS.max}" value="${escapeHtml(

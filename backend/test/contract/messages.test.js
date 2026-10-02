@@ -323,6 +323,7 @@ test('Golden messages round-trip in both languages', async (t) => {
     'checkin-request-no-warnings.json',
     'checkin-request-with-compliance.json',
     'checkin-request-with-agent-version.json',
+    'checkin-request-with-antivirus-findings.json',
     'policy-bundle-response.json',
     'policy-bundle-response-no-conflicts.json',
     'checkin-response.json',

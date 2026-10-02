@@ -84,6 +84,11 @@ export interface Posture {
   };
   antivirus: {
     name: string;
+    /**
+     * True when antivirus is active. Windows: Microsoft Defender reports itself
+     * enabled, or any antivirus product registered with Windows Security Center
+     * is active. macOS: the XProtect bundle is present.
+     */
     enabled: boolean;
     definitionsAgeDays: number;
   };
@@ -122,6 +127,23 @@ export interface CheckInRequest {
     /** Violation keys such as `firewall_disabled`. Empty when compliant. */
     violations: string[];
   }>;
+  /**
+   * Threat detections from Microsoft Defender (Windows) or XProtect (macOS),
+   * at most 20. Absent entirely when there are none. Never affects compliance.
+   */
+  antivirusFindings?: AntivirusFinding[];
+}
+
+/** One threat detection reported on a check-in. All six fields are present. */
+export interface AntivirusFinding {
+  /** Defender DetectionID, or the derived XProtect id. */
+  findingId: string;
+  threatName: string;
+  severity: 'unknown' | 'low' | 'moderate' | 'high' | 'severe';
+  /** ISO-8601 UTC. */
+  detectedAt: string;
+  resources: string[];
+  remediated: boolean;
 }
 
 /**

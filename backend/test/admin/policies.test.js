@@ -528,7 +528,7 @@ test('Scenario: Compliance report stores per policy per device', async (t) => {
 // TASK-029: Firewall and Domain Settings Tests
 // ============================================================================
 
-test('Scenario: POLICY_SETTING_KEYS holds exactly the seven keys', async (t) => {
+test('Scenario: POLICY_SETTING_KEYS holds exactly the eight keys', async (t) => {
   const { POLICY_SETTING_KEYS } = await import(
     `file://${join(__dirname, '../../dist/admin/policies.js')}`
   );
@@ -541,9 +541,10 @@ test('Scenario: POLICY_SETTING_KEYS holds exactly the seven keys', async (t) => 
     'localAdminAllowlist',
     'firewallBlockedDomains',
     'firewallAllowedDomains',
+    'antivirusEnabled',
   ];
 
-  assert.strictEqual(POLICY_SETTING_KEYS.length, 7);
+  assert.strictEqual(POLICY_SETTING_KEYS.length, 8);
   assert.deepStrictEqual(POLICY_SETTING_KEYS.sort(), expectedKeys.sort());
 });
 

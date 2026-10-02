@@ -433,7 +433,7 @@ test('Unit - policy settings restricted to allowed keys', async (t) => {
 // TASK-029: Firewall and Domain UI Tests
 // ============================================================================
 
-test('Scenario: SETTING_KEYS holds exactly the seven keys', async (t) => {
+test('Scenario: SETTING_KEYS holds exactly the eight keys', async (t) => {
   const expectedKeys = [
     'firewallEnabled',
     'diskEncryptionRequired',
@@ -442,9 +442,10 @@ test('Scenario: SETTING_KEYS holds exactly the seven keys', async (t) => {
     'localAdminAllowlist',
     'firewallBlockedDomains',
     'firewallAllowedDomains',
+    'antivirusEnabled',
   ];
 
-  assert.strictEqual(policiesModule.SETTING_KEYS.length, 7);
+  assert.strictEqual(policiesModule.SETTING_KEYS.length, 8);
   assert.deepStrictEqual(policiesModule.SETTING_KEYS.sort(), expectedKeys.sort());
 });
 

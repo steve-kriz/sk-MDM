@@ -30,6 +30,7 @@
 import { isoUtc } from '../audit.js';
 import {
   GSI1_NAME,
+  deviceAntivirusFinding,
   deviceCommand,
   deviceInventory,
   deviceListIndex,
@@ -76,6 +77,9 @@ export const STALE_AFTER_MILLIS = 86400000;
 
 /** The most commands the detail view returns, newest issue first. */
 export const MAX_DETAIL_COMMANDS = 20;
+
+/** The most antivirus findings the detail view returns, newest detection first. */
+export const MAX_DETAIL_FINDINGS = 50;
 
 /**
  * Attributes never returned by an admin read route: the stored device secret
@@ -375,6 +379,49 @@ async function readCommands(table: AdminTable, deviceId: string): Promise<Item[]
   return commands.sort(byIssuedAtDescending).slice(0, MAX_DETAIL_COMMANDS).map(publicCommand);
 }
 
+/** Newest detection first; findings detected at the same instant by id, ascending. */
+function byDetectedAtDescending(a: Item, b: Item): number {
+  const left = typeof a.detectedAt === 'string' ? a.detectedAt : '';
+  const right = typeof b.detectedAt === 'string' ? b.detectedAt : '';
+  if (left !== right) {
+    return left < right ? 1 : -1;
+  }
+  const leftId = typeof a.findingId === 'string' ? a.findingId : '';
+  const rightId = typeof b.findingId === 'string' ? b.findingId : '';
+  return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+}
+
+/**
+ * Every antivirus finding stored for a device, newest detection first, capped
+ * at `MAX_DETAIL_FINDINGS`. Read like the commands: a query on the device's
+ * own partition, following the cursor to the end, ordered here.
+ */
+async function readAntivirusFindings(table: AdminTable, deviceId: string): Promise<Item[]> {
+  // An empty finding id yields the device's partition key and the
+  // `AVFINDING#` prefix every finding of this device is stored under.
+  const { pk, sk: findingPrefix } = deviceAntivirusFinding(deviceId, '');
+
+  const findings: Item[] = [];
+  let cursor: string | null = null;
+  do {
+    const page: QueryPage = await table.query({
+      KeyConditionExpression: '#pk = :pk AND begins_with(#sk, :findingPrefix)',
+      ExpressionAttributeNames: { '#pk': 'pk', '#sk': 'sk' },
+      ExpressionAttributeValues: { ':pk': pk, ':findingPrefix': findingPrefix },
+      cursor,
+    });
+    findings.push(...page.items);
+    const next = page.cursor ?? null;
+    // A cursor that does not move would page forever; treat it as the end.
+    cursor = next === cursor ? null : next;
+  } while (cursor !== null);
+
+  return findings
+    .sort(byDetectedAtDescending)
+    .slice(0, MAX_DETAIL_FINDINGS)
+    .map((finding) => publicItem(finding) ?? {});
+}
+
 /**
  * `GET /admin/api/v1/devices/{deviceId}` -- one device in full: its profile,
  * its last inventory and posture snapshots, and its most recent commands.
@@ -408,6 +455,7 @@ export const handleDeviceDetail: AdminRouteHandler = async (req, deps): Promise<
       inventory: publicItem(inventory),
       posture: publicItem(posture),
       commands: await readCommands(deps.table, deviceId),
+      antivirusFindings: await readAntivirusFindings(deps.table, deviceId),
     },
   };
 };

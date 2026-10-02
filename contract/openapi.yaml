@@ -455,6 +455,11 @@ components:
               type: string
             enabled:
               type: boolean
+              description: >-
+                True when antivirus is active. On Windows: Microsoft Defender
+                reports itself enabled, or any antivirus product registered with
+                Windows Security Center is active. On macOS: the XProtect bundle
+                is present.
             definitionsAgeDays:
               type: integer
         osUpdate:
@@ -518,6 +523,38 @@ components:
                 description: Violation keys such as `firewall_disabled`. Empty when compliant.
                 items:
                   type: string
+        antivirusFindings:
+          type: array
+          description: >-
+            Threat detections reported by Microsoft Defender (Windows) or
+            XProtect (macOS), at most 20. Omitted entirely when there are none.
+            Never affects complianceState.
+          items:
+            $ref: '#/components/schemas/AntivirusFinding'
+
+    AntivirusFinding:
+      type: object
+      additionalProperties: false
+      required: [findingId, threatName, severity, detectedAt, resources, remediated]
+      properties:
+        findingId:
+          type: string
+          description: Defender DetectionID, or the derived XProtect id.
+        threatName:
+          type: string
+        severity:
+          type: string
+          enum: [unknown, low, moderate, high, severe]
+        detectedAt:
+          type: string
+          format: date-time
+          description: ISO-8601 UTC.
+        resources:
+          type: array
+          items:
+            type: string
+        remediated:
+          type: boolean
 
     CheckInResponse:
       type: object

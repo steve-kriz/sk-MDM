@@ -14,7 +14,7 @@
  * by a verified admin (see `src/admin/router.ts`), and every dependency is
  * injected, so tests drive them with a stub verifier and a fake table.
  *
- * `settings` is a closed vocabulary: exactly the seven keys in
+ * `settings` is a closed vocabulary: exactly the eight keys in
  * `POLICY_SETTING_KEYS`, each of its own type and range. A key this backend
  * does not know is refused rather than stored, because an agent cannot enforce
  * a setting it has never heard of -- storing it would produce a policy the UI
@@ -92,6 +92,7 @@ export const POLICY_SETTING_KEYS = [
   'localAdminAllowlist',
   'firewallBlockedDomains',
   'firewallAllowedDomains',
+  'antivirusEnabled',
 ] as const;
 
 /**
@@ -154,6 +155,7 @@ const SETTING_CHECKS: Readonly<Record<(typeof POLICY_SETTING_KEYS)[number], Sett
     Array.isArray(value) && value.every((entry) => typeof entry === 'string'),
   firewallBlockedDomains: isDomainList,
   firewallAllowedDomains: isDomainList,
+  antivirusEnabled: (value) => typeof value === 'boolean',
 };
 
 /** The string value of an attribute, or `null` when it is not a non-empty string. */

@@ -57,6 +57,7 @@ import { DEFAULT_CHECKIN_INTERVAL_SECONDS } from '../config/intervals.js';
 import type { AgentRelease, CheckInResponse } from '../contract/types.js';
 import {
   agentRelease as agentReleaseKey,
+  deviceAntivirusFinding,
   deviceCommand,
   deviceCompliance,
   deviceInventory,
@@ -97,6 +98,24 @@ export const ARCHITECTURE_ALIASES: Record<string, string> = {
   arm64: 'arm64',
   aarch64: 'arm64',
 };
+
+/** The most antivirus findings one check-in may report; later entries are ignored. */
+export const MAX_ANTIVIRUS_FINDINGS = 20;
+
+/** The most resources stored per antivirus finding. */
+export const MAX_FINDING_RESOURCES = 3;
+
+/** The longest stored resource of an antivirus finding, in characters. */
+export const MAX_RESOURCE_LENGTH = 260;
+
+/** The longest stored antivirus threat name, in characters. */
+export const MAX_THREAT_NAME_LENGTH = 256;
+
+/** The longest antivirus finding id accepted, in characters. */
+export const MAX_FINDING_ID_LENGTH = 128;
+
+/** The severities an antivirus finding may carry; anything else is stored as `unknown`. */
+const FINDING_SEVERITIES = new Set(['unknown', 'low', 'moderate', 'high', 'severe']);
 
 /** `2026-10-02T07:15:00Z` -- the only timestamp shape the contract accepts. */
 const ISO_UTC_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
@@ -408,6 +427,82 @@ async function countPendingCommands(table: CheckInTable, deviceId: string): Prom
 }
 
 /**
+ * Store the antivirus threat detections the agent reported, one item per
+ * finding.
+ *
+ * A check-in is never refused over its findings: a value that is not an array
+ * stores nothing, only the first `MAX_ANTIVIRUS_FINDINGS` entries are looked
+ * at, and an entry without a usable id, threat name or detection time is
+ * dropped. What is kept is clamped to the contract's bounds. A finding reported
+ * again keeps the `firstReportedAt` of its first report; every other field
+ * takes the latest report's value. Findings never touch `complianceState`.
+ */
+async function recordAntivirusFindings(
+  table: CheckInTable,
+  deviceId: string,
+  reported: unknown,
+  at: Date,
+): Promise<void> {
+  if (!Array.isArray(reported)) {
+    return;
+  }
+
+  const reportedAt = isoUtc(at);
+  for (const entry of reported.slice(0, MAX_ANTIVIRUS_FINDINGS)) {
+    if (!isObject(entry)) {
+      continue;
+    }
+    const { findingId, threatName, detectedAt } = entry;
+    if (
+      typeof findingId !== 'string' ||
+      findingId.length === 0 ||
+      findingId.length > MAX_FINDING_ID_LENGTH ||
+      typeof threatName !== 'string' ||
+      threatName.length === 0 ||
+      typeof detectedAt !== 'string' ||
+      !ISO_UTC_PATTERN.test(detectedAt)
+    ) {
+      continue;
+    }
+    let key: TableKey;
+    try {
+      key = deviceAntivirusFinding(deviceId, findingId);
+    } catch {
+      // A finding id carrying the key separator cannot be stored.
+      continue;
+    }
+
+    const existing = await table.get(key);
+    const firstReportedAt =
+      typeof existing?.firstReportedAt === 'string' ? existing.firstReportedAt : reportedAt;
+    const severity =
+      typeof entry.severity === 'string' && FINDING_SEVERITIES.has(entry.severity)
+        ? entry.severity
+        : 'unknown';
+    const resources = Array.isArray(entry.resources)
+      ? entry.resources
+          .filter((resource): resource is string => typeof resource === 'string')
+          .slice(0, MAX_FINDING_RESOURCES)
+          .map((resource) => resource.slice(0, MAX_RESOURCE_LENGTH))
+      : [];
+
+    await table.put({
+      ...key,
+      deviceId,
+      findingId,
+      threatName: threatName.slice(0, MAX_THREAT_NAME_LENGTH),
+      severity,
+      detectedAt,
+      resources,
+      // Anything that is not an explicit `true` is not known to be remediated.
+      remediated: entry.remediated === true,
+      firstReportedAt,
+      lastReportedAt: reportedAt,
+    });
+  }
+}
+
+/**
  * Store what the agent reported about its policies, then settle the device's
  * compliance state.
  *
@@ -603,6 +698,9 @@ export function createCheckInHandler(source: CheckInDependencySource): RouteHand
 
     // Whatever the agent evaluated against the bundle it last pulled.
     await recordPolicyCompliance(deps.table, deviceId, posted.policyCompliance, at);
+
+    // Threat detections are stored for the admin; they never move compliance.
+    await recordAntivirusFindings(deps.table, deviceId, posted.antivirusFindings, at);
 
     const release = await resolveAgentRelease(deps.table, deviceId, posted);
 

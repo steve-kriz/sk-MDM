@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/officehq/sk-mdm/agent/internal/antivirus"
 	"github.com/officehq/sk-mdm/agent/internal/client"
 	"github.com/officehq/sk-mdm/agent/internal/config"
 	"github.com/officehq/sk-mdm/agent/internal/contract"
@@ -204,7 +205,11 @@ func newAgent(env agentEnv) (*agent, error) {
 		// as found and the next one reports the result.
 		Enforce: func(ctx context.Context, effective map[string]any, pst contract.Posture) {
 			enforceLogger := logger.With("enforce")
-			enforce.Run(ctx, enforce.Defaults(env.Runner, env.FS, env.GOOS, enforceLogger), effective, pst, enforceLogger)
+			// The antivirus enforcer needs the clock, which Defaults does not
+			// take, so it follows the default list rather than joining it.
+			enforcers := append(enforce.Defaults(env.Runner, env.FS, env.GOOS, enforceLogger),
+				antivirus.NewEnforcer(env.Runner, env.Clock, env.GOOS))
+			enforce.Run(ctx, enforcers, effective, pst, enforceLogger)
 		},
 	}
 

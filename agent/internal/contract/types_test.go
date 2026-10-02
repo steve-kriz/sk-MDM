@@ -22,6 +22,7 @@ func loadMessageFiles(t *testing.T) map[string][]byte {
 		"checkin-request-no-warnings.json",
 		"checkin-request-with-compliance.json",
 		"checkin-request-with-agent-version.json",
+		"checkin-request-with-antivirus-findings.json",
 		"policy-bundle-response.json",
 		"policy-bundle-response-no-conflicts.json",
 		"enroll-request.json",
@@ -527,6 +528,7 @@ func TestAllMessageFilesRoundTrip(t *testing.T) {
 		"checkin-request.json",
 		"checkin-request-no-warnings.json",
 		"checkin-request-with-compliance.json",
+		"checkin-request-with-antivirus-findings.json",
 	}
 
 	for _, file := range checkInFiles {

@@ -98,6 +98,17 @@ export function deviceCompliance(deviceId: string, policyId: string): TableKey {
   return { pk: `DEVICE#${assertValidId(deviceId)}`, sk: `COMPLIANCE#${assertValidId(policyId)}` };
 }
 
+/**
+ * `DEVICE#<deviceId>` / `AVFINDING#<findingId>` -- one antivirus threat
+ * detection the device reported.
+ *
+ * One item per finding: a later report of the same finding overwrites the
+ * earlier one, keeping its `firstReportedAt`.
+ */
+export function deviceAntivirusFinding(deviceId: string, findingId: string): TableKey {
+  return { pk: `DEVICE#${assertValidId(deviceId)}`, sk: `AVFINDING#${assertValidId(findingId)}` };
+}
+
 /** `POLICY#<policyId>` / `PROFILE` -- the policy document. */
 export function policy(policyId: string): TableKey {
   return { pk: `POLICY#${assertValidId(policyId)}`, sk: 'PROFILE' };

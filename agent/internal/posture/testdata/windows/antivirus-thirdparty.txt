@@ -1,0 +1,5 @@
+name=Microsoft Defender
+enabled=False
+definitionsAgeDays=0
+product=393472|Windows Defender
+product=266240|Contoso Endpoint Security
