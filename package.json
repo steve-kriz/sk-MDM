@@ -1,0 +1,17 @@
+{
+  "name": "sk-mdm",
+  "version": "0.0.0",
+  "private": true,
+  "description": "SK-MDM: cross-platform device management backend, agent and installers",
+  "workspaces": [
+    "backend"
+  ],
+  "scripts": {
+    "build": "npm --prefix backend run build",
+    "build:agent": "node scripts/build-agent.mjs",
+    "test": "npm --prefix backend run build && node --test \"backend/test/**/*.test.js\" \"installers/test/**/*.test.js\""
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
