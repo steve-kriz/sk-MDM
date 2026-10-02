@@ -46,26 +46,27 @@ var enrollBackoff = []time.Duration{
 type HostFacts struct {
 	// Hostname is the machine name.
 	Hostname string
-	// Platform is "windows" or "macos"; empty means this build's GOOS,
+	// Platform is "windows" or "darwin"; empty means this build's GOOS,
 	// mapped by PlatformName.
 	Platform string
 	// OSVersion is the OS version string, e.g. "10.0.22631".
 	OSVersion string
-	// SerialNumber is the hardware serial that identifies the machine
-	// across re-installs.
-	SerialNumber string
+	// HardwareUUID is the stable hardware identifier that lets the backend
+	// recognise this machine across re-installs.
+	HardwareUUID string
 	// AgentVersion is the agent build; empty means version.Version.
 	AgentVersion string
 }
 
 // PlatformName maps a GOOS value to the platform value on the wire contract:
-// "windows" for Windows and "macos" for anything else, the agent shipping for
-// those two platforms only.
+// "windows" for Windows and "darwin" for anything else, the agent shipping
+// for those two platforms only. Both values are GOOS values, so this is the
+// identity for every platform the agent supports.
 func PlatformName(goos string) string {
 	if goos == "windows" {
 		return "windows"
 	}
-	return "macos"
+	return "darwin"
 }
 
 // Enroll performs first-run enrollment: it POSTs the device description to
@@ -164,9 +165,8 @@ func (c *Client) enrollRequest() contract.EnrollRequest {
 		Hostname:     host.Hostname,
 		Platform:     host.Platform,
 		OSVersion:    host.OSVersion,
+		HardwareUUID: host.HardwareUUID,
 		AgentVersion: host.AgentVersion,
-		SerialNumber: host.SerialNumber,
-		EnrolledAt:   c.clock.Now().UTC().Format(time.RFC3339),
 	}
 }
 

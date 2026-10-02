@@ -22,16 +22,14 @@
 export interface EnrollRequest {
   /** Machine host name as reported by the OS. */
   hostname: string;
-  /** Agent platform: `windows` or `macos`. */
-  platform: 'windows' | 'macos';
+  /** Agent platform: `windows` or `darwin`. */
+  platform: 'windows' | 'darwin';
   /** OS marketing version, e.g. `10.0.22631` or `14.5`. */
   osVersion: string;
+  /** Stable hardware UUID, used to re-attach a re-enrolling device. */
+  hardwareUuid: string;
   /** Agent build version, e.g. `0.0.0-dev`. */
   agentVersion: string;
-  /** Hardware serial number, used to re-attach a re-enrolling device. */
-  serialNumber: string;
-  /** When the agent sent the request, ISO-8601 UTC. */
-  enrolledAt: string;
 }
 
 /** Response to `POST /api/v1/enroll`. Carries the device's HMAC secret exactly once. */

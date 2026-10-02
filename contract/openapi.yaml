@@ -321,23 +321,22 @@ components:
     EnrollRequest:
       type: object
       additionalProperties: false
-      required: [hostname, platform, osVersion, agentVersion, serialNumber, enrolledAt]
+      required: [hostname, platform, osVersion, hardwareUuid, agentVersion]
       properties:
         hostname:
           type: string
         platform:
           type: string
-          enum: [windows, macos]
+          enum: [windows, darwin]
         osVersion:
           type: string
+        hardwareUuid:
+          type: string
+          description: >-
+            Stable hardware identifier, used to re-attach a device that
+            enrolls again after a re-install.
         agentVersion:
           type: string
-        serialNumber:
-          type: string
-        enrolledAt:
-          type: string
-          format: date-time
-          description: ISO-8601 UTC.
 
     EnrollResponse:
       type: object
