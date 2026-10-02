@@ -1,0 +1,4 @@
+name=Microsoft Windows 11 Enterprise
+version=10.0.22631
+build=22631
+architecture=AMD64

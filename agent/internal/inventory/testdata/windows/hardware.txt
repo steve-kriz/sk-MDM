@@ -1,0 +1,5 @@
+manufacturer=LENOVO
+model=20XW004PUS
+serialNumber=PF2K8R3C
+cpu=11th Gen Intel(R) Core(TM) i7-1185G7 @ 3.00GHz
+ramBytes=34072571904

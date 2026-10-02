@@ -1,0 +1,38 @@
+{
+  "SPApplicationsDataType" : [
+    {
+      "_name" : "Safari",
+      "arch_kind" : "arch_arm_i64",
+      "lastModified" : "2025-09-14T08:12:00Z",
+      "obtained_from" : "apple",
+      "path" : "/Applications/Safari.app",
+      "signed_by" : [
+        "Software Signing",
+        "Apple Code Signing Certification Authority"
+      ],
+      "version" : "17.6"
+    },
+    {
+      "_name" : "Slack",
+      "arch_kind" : "arch_arm_i64",
+      "lastModified" : "2025-08-27T19:40:11Z",
+      "obtained_from" : "identified_developer",
+      "path" : "/Applications/Slack.app",
+      "signed_by" : [
+        "Developer ID Application: Slack Technologies, Inc. (BQR82RBBHL)"
+      ],
+      "version" : "4.40.133"
+    },
+    {
+      "_name" : "Visual Studio Code",
+      "arch_kind" : "arch_arm_i64",
+      "lastModified" : "2025-09-02T06:55:43Z",
+      "obtained_from" : "identified_developer",
+      "path" : "/Applications/Visual Studio Code.app",
+      "signed_by" : [
+        "Developer ID Application: Microsoft Corporation (UBF8T346G9)"
+      ],
+      "version" : "1.93.1"
+    }
+  ]
+}

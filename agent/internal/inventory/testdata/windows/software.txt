@@ -1,0 +1,6 @@
+Google Chrome	129.0.6668.71	Google LLC	20250914
+Microsoft Edge	129.0.2792.65	Microsoft Corporation	20250901
+	1.2.3	Unknown Vendor	20250101
+Google Chrome	129.0.6668.71	Google LLC	20250914
+7-Zip 24.08 (x64)	24.08	Igor Pavlov	20250722
+Microsoft Visual C++ 2015-2022 Redistributable (x64)	14.40.33810	Microsoft Corporation	20250612

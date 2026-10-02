@@ -1,0 +1,3 @@
+name=Microsoft Defender
+enabled=True
+definitionsAgeDays=1
