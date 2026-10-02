@@ -624,6 +624,235 @@ func TestScenario_UnauthorizedCheckInForcesReEnrollment(t *testing.T) {
 	}
 }
 
+// TestScenario_ApplyUpdateCalledWhenReleaseAdvertised tests that ApplyUpdate is called when agentRelease is in response
+func TestScenario_ApplyUpdateCalledWhenReleaseAdvertised(t *testing.T) {
+	// Given: a check-in response that carries agentRelease
+	clock := fake.NewClock(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC))
+	fsys := fake.NewFS()
+
+	st := state.State{DeviceID: "d1", DeviceSecret: "secret"}
+	stateData, _ := json.Marshal(st)
+	fsys.Seed(state.StatePath("darwin"), stateData)
+
+	inv := contract.Inventory{}
+	pst := contract.Posture{}
+
+	applyUpdateCalls := 0
+	var appliedRelease *contract.AgentRelease
+
+	transport := &mockTransport{
+		doFunc: func(method, path string, body []byte) (*http.Response, error) {
+			if method == "GET" && strings.Contains(path, "policies") {
+				data, _ := json.Marshal(contract.PolicyBundleResponse{})
+				return fake.Response(http.StatusOK, string(data)), nil
+			}
+			if method == "POST" && strings.Contains(path, "checkin") {
+				data, _ := json.Marshal(contract.CheckInResponse{
+					CheckInIntervalSeconds: 900,
+					PendingCommandCount:    0,
+					AgentRelease: &contract.AgentRelease{
+						Version: "1.3.0",
+						URL:     "https://example.com/agent",
+						SHA256:  "a" + strings.Repeat("0", 63),
+					},
+				})
+				return fake.Response(http.StatusOK, string(data)), nil
+			}
+			return fake.Response(http.StatusOK, "{}"), nil
+		},
+	}
+
+	stateStore := &fakeStore{state: st}
+
+	deps := &Deps{
+		Client: transport,
+		Store:  stateStore,
+		FS:     fsys,
+		Clock:  clock,
+		GOOS:   "darwin",
+		CollectInventory: func() (contract.Inventory, error) {
+			return inv, nil
+		},
+		CollectPosture: func() (contract.Posture, error) {
+			return pst, nil
+		},
+		ApplyUpdate: func(ctx context.Context, rel contract.AgentRelease) error {
+			applyUpdateCalls++
+			appliedRelease = &rel
+			return nil
+		},
+	}
+
+	// When: RunOnce executes
+	err := RunOnce(context.Background(), deps)
+
+	// Then: ApplyUpdate was called exactly once
+	if applyUpdateCalls != 1 {
+		t.Errorf("Expected ApplyUpdate to be called once, got %d calls", applyUpdateCalls)
+	}
+
+	// And: it was called with the advertised release
+	if appliedRelease == nil {
+		t.Fatal("ApplyUpdate was not called with a release")
+	}
+	if appliedRelease.Version != "1.3.0" {
+		t.Errorf("Expected version 1.3.0, got %s", appliedRelease.Version)
+	}
+
+	// And: the cycle completed successfully
+	if err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+}
+
+// TestScenario_ApplyUpdateErrorDoesNotStopCycle tests that an ApplyUpdate error doesn't stop the cycle
+func TestScenario_ApplyUpdateErrorDoesNotStopCycle(t *testing.T) {
+	// Given: a check-in response with agentRelease and ApplyUpdate returns an error
+	clock := fake.NewClock(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC))
+	fsys := fake.NewFS()
+
+	st := state.State{DeviceID: "d1", DeviceSecret: "secret"}
+	stateData, _ := json.Marshal(st)
+	fsys.Seed(state.StatePath("darwin"), stateData)
+
+	inv := contract.Inventory{}
+	pst := contract.Posture{}
+
+	applyUpdateCalls := 0
+	afterCheckInCalls := 0
+
+	transport := &mockTransport{
+		doFunc: func(method, path string, body []byte) (*http.Response, error) {
+			if method == "GET" && strings.Contains(path, "policies") {
+				data, _ := json.Marshal(contract.PolicyBundleResponse{})
+				return fake.Response(http.StatusOK, string(data)), nil
+			}
+			if method == "POST" && strings.Contains(path, "checkin") {
+				data, _ := json.Marshal(contract.CheckInResponse{
+					CheckInIntervalSeconds: 900,
+					PendingCommandCount:    1,
+					AgentRelease: &contract.AgentRelease{
+						Version: "1.3.0",
+						URL:     "https://example.com/agent",
+						SHA256:  "a" + strings.Repeat("0", 63),
+					},
+				})
+				return fake.Response(http.StatusOK, string(data)), nil
+			}
+			return fake.Response(http.StatusOK, "{}"), nil
+		},
+	}
+
+	stateStore := &fakeStore{state: st}
+
+	deps := &Deps{
+		Client: transport,
+		Store:  stateStore,
+		FS:     fsys,
+		Clock:  clock,
+		GOOS:   "darwin",
+		CollectInventory: func() (contract.Inventory, error) {
+			return inv, nil
+		},
+		CollectPosture: func() (contract.Posture, error) {
+			return pst, nil
+		},
+		ApplyUpdate: func(ctx context.Context, rel contract.AgentRelease) error {
+			applyUpdateCalls++
+			return errors.New("update failed")
+		},
+		AfterCheckIn: func(ctx context.Context, resp contract.CheckInResponse) error {
+			afterCheckInCalls++
+			return nil
+		},
+	}
+
+	// When: RunOnce executes
+	err := RunOnce(context.Background(), deps)
+
+	// Then: ApplyUpdate was called once
+	if applyUpdateCalls != 1 {
+		t.Errorf("Expected ApplyUpdate to be called once, got %d calls", applyUpdateCalls)
+	}
+
+	// And: AfterCheckIn was still called (cycle didn't stop)
+	if afterCheckInCalls != 1 {
+		t.Errorf("Expected AfterCheckIn to be called once, got %d calls", afterCheckInCalls)
+	}
+
+	// And: the cycle completed successfully despite the update error
+	if err != nil {
+		t.Fatalf("RunOnce should not fail due to ApplyUpdate error, got %v", err)
+	}
+}
+
+// TestScenario_NoApplyUpdateWhenNoReleaseAdvertised tests that ApplyUpdate is not called without release
+func TestScenario_NoApplyUpdateWhenNoReleaseAdvertised(t *testing.T) {
+	// Given: a check-in response with no agentRelease
+	clock := fake.NewClock(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC))
+	fsys := fake.NewFS()
+
+	st := state.State{DeviceID: "d1", DeviceSecret: "secret"}
+	stateData, _ := json.Marshal(st)
+	fsys.Seed(state.StatePath("darwin"), stateData)
+
+	inv := contract.Inventory{}
+	pst := contract.Posture{}
+
+	applyUpdateCalls := 0
+
+	transport := &mockTransport{
+		doFunc: func(method, path string, body []byte) (*http.Response, error) {
+			if method == "GET" && strings.Contains(path, "policies") {
+				data, _ := json.Marshal(contract.PolicyBundleResponse{})
+				return fake.Response(http.StatusOK, string(data)), nil
+			}
+			if method == "POST" && strings.Contains(path, "checkin") {
+				data, _ := json.Marshal(contract.CheckInResponse{
+					CheckInIntervalSeconds: 900,
+					PendingCommandCount:    0,
+					// No AgentRelease
+				})
+				return fake.Response(http.StatusOK, string(data)), nil
+			}
+			return fake.Response(http.StatusOK, "{}"), nil
+		},
+	}
+
+	stateStore := &fakeStore{state: st}
+
+	deps := &Deps{
+		Client: transport,
+		Store:  stateStore,
+		FS:     fsys,
+		Clock:  clock,
+		GOOS:   "darwin",
+		CollectInventory: func() (contract.Inventory, error) {
+			return inv, nil
+		},
+		CollectPosture: func() (contract.Posture, error) {
+			return pst, nil
+		},
+		ApplyUpdate: func(ctx context.Context, rel contract.AgentRelease) error {
+			applyUpdateCalls++
+			return nil
+		},
+	}
+
+	// When: RunOnce executes
+	err := RunOnce(context.Background(), deps)
+
+	// Then: ApplyUpdate was not called
+	if applyUpdateCalls != 0 {
+		t.Errorf("Expected ApplyUpdate not to be called, got %d calls", applyUpdateCalls)
+	}
+
+	// And: the cycle completed successfully
+	if err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+}
+
 // fakeStore is a simple mock of the state store.
 type fakeStore struct {
 	state           state.State

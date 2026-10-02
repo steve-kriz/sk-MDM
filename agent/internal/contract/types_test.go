@@ -21,6 +21,7 @@ func loadMessageFiles(t *testing.T) map[string][]byte {
 		"checkin-request.json",
 		"checkin-request-no-warnings.json",
 		"checkin-request-with-compliance.json",
+		"checkin-request-with-agent-version.json",
 		"policy-bundle-response.json",
 		"policy-bundle-response-no-conflicts.json",
 		"enroll-request.json",
@@ -28,6 +29,7 @@ func loadMessageFiles(t *testing.T) map[string][]byte {
 		"command-lease-response.json",
 		"command-result-request.json",
 		"checkin-response.json",
+		"checkin-response-with-release.json",
 	}
 
 	messages := make(map[string][]byte)
@@ -586,6 +588,117 @@ func TestAllMessageFilesRoundTrip(t *testing.T) {
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&checkinResp); err != nil {
 		t.Fatalf("Failed to decode checkin-response.json: %v", err)
+	}
+}
+
+func TestCheckInRequestWithAgentVersion(t *testing.T) {
+	// Test: Check-in request with agent version round-trips
+	messages := loadMessageFiles(t)
+
+	var req CheckInRequest
+	decoder := json.NewDecoder(strings.NewReader(string(messages["checkin-request-with-agent-version.json"])))
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&req); err != nil {
+		t.Fatalf("Failed to decode checkin-request-with-agent-version.json: %v", err)
+	}
+
+	// Verify agentVersion field is populated
+	if req.AgentVersion == "" {
+		t.Error("AgentVersion should not be empty in checkin-request-with-agent-version.json")
+	}
+
+	// Verify it round-trips: re-marshal and check agentVersion is present
+	data, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	if !strings.Contains(string(data), "\"agentVersion\"") {
+		t.Error("Marshalled JSON should contain agentVersion when set")
+	}
+
+	// Verify omitempty works: create a request with empty agentVersion
+	emptyVersionReq := CheckInRequest{
+		CollectedAt: "2026-10-02T07:15:00Z",
+		Inventory: Inventory{
+			Hardware: InventoryHardware{Manufacturer: "Test", Model: "Test", SerialNumber: "Test", CPU: "Test"},
+			OS:       InventoryOS{Name: "Test", Version: "Test", Build: "Test", Architecture: "amd64"},
+			Software: []SoftwareEntry{},
+		},
+		Posture: Posture{
+			Firewall:   Firewall{Enabled: true},
+			Antivirus:  Antivirus{Name: "Test", Enabled: true, DefinitionsAgeDays: 1},
+			OSUpdate:   OSUpdate{LastCheckedAt: "2026-10-02T07:15:00Z", PendingCount: 0},
+			LocalAdmins: []string{},
+		},
+		AgentVersion: "",
+	}
+	emptyData, err := json.Marshal(emptyVersionReq)
+	if err != nil {
+		t.Fatalf("Failed to marshal empty version: %v", err)
+	}
+
+	if strings.Contains(string(emptyData), "\"agentVersion\"") {
+		t.Error("Marshalled JSON should omit agentVersion when empty (omitempty)")
+	}
+}
+
+func TestCheckInResponseWithRelease(t *testing.T) {
+	// Test: Check-in response with agent release round-trips
+	messages := loadMessageFiles(t)
+
+	var resp CheckInResponse
+	decoder := json.NewDecoder(strings.NewReader(string(messages["checkin-response-with-release.json"])))
+	decoder.DisallowUnknownFields()
+
+	if err := decoder.Decode(&resp); err != nil {
+		t.Fatalf("Failed to decode checkin-response-with-release.json: %v", err)
+	}
+
+	// Verify required fields
+	if resp.CheckInIntervalSeconds == 0 {
+		t.Error("CheckInIntervalSeconds should be set")
+	}
+
+	// Verify agentRelease is populated
+	if resp.AgentRelease == nil {
+		t.Fatal("AgentRelease should not be nil in checkin-response-with-release.json")
+	}
+
+	if resp.AgentRelease.Version == "" {
+		t.Error("AgentRelease.Version should not be empty")
+	}
+	if resp.AgentRelease.URL == "" {
+		t.Error("AgentRelease.URL should not be empty")
+	}
+	if resp.AgentRelease.SHA256 == "" {
+		t.Error("AgentRelease.SHA256 should not be empty")
+	}
+
+	// Verify it round-trips
+	data, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("Failed to marshal: %v", err)
+	}
+
+	if !strings.Contains(string(data), "\"agentRelease\"") {
+		t.Error("Marshalled JSON should contain agentRelease when set")
+	}
+
+	// Verify omitempty works: create a response with nil agentRelease
+	emptyReleaseResp := CheckInResponse{
+		CheckInIntervalSeconds: 900,
+		PendingCommandCount:    0,
+		AgentRelease:           nil,
+	}
+	emptyData, err := json.Marshal(emptyReleaseResp)
+	if err != nil {
+		t.Fatalf("Failed to marshal empty release: %v", err)
+	}
+
+	if strings.Contains(string(emptyData), "\"agentRelease\"") {
+		t.Error("Marshalled JSON should omit agentRelease when nil")
 	}
 }
 
