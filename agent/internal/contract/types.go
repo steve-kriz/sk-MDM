@@ -14,8 +14,12 @@
 //     scheme in signing.go.
 //
 // Timestamps documented as "ISO-8601 UTC" are strings such as
-// "2026-10-02T07:15:00Z". The signing scheme uses epoch seconds instead.
+// "2026-10-02T07:15:00Z". The signing scheme uses epoch seconds instead, as
+// does a command result's FinishedAt; a command's own IssuedAt and ExpiresAt
+// are epoch milliseconds. Each field's unit is stated on the field.
 package contract
+
+import "encoding/json"
 
 // EnrollRequest is the body of POST /api/v1/enroll.
 //
@@ -143,30 +147,30 @@ type CheckInResponse struct {
 	PendingCommandCount int    `json:"pendingCommandCount"`
 }
 
-// Command is one command leased to the device.
+// Command is one command leased to the device. Payload is left as raw JSON:
+// its shape depends on Type, so only the handler for that verb decodes it.
 type Command struct {
-	CommandID      string         `json:"commandId"`
-	Type           string         `json:"type"`
-	Parameters     map[string]any `json:"parameters"`
-	IssuedAt       string         `json:"issuedAt"`       // ISO-8601 UTC
-	LeaseExpiresAt string         `json:"leaseExpiresAt"` // ISO-8601 UTC
+	CommandID string          `json:"commandId"`
+	Type      string          `json:"type"`
+	Payload   json.RawMessage `json:"payload"`
+	IssuedAt  int64           `json:"issuedAt"`  // epoch milliseconds
+	ExpiresAt int64           `json:"expiresAt"` // epoch milliseconds
 }
 
 // CommandLeaseResponse is the body of GET /api/v1/devices/{deviceId}/commands.
+// The lease expiry is server-side state and is not on the wire.
 type CommandLeaseResponse struct {
-	DeviceID string    `json:"deviceId"`
-	LeasedAt string    `json:"leasedAt"` // ISO-8601 UTC
 	Commands []Command `json:"commands"`
 }
 
 // CommandResultRequest is the body of
-// POST /api/v1/devices/{deviceId}/commands/{commandId}/result.
+// POST /api/v1/devices/{deviceId}/commands/{commandId}/result. The command is
+// named by the path, so it is not repeated in the body.
 type CommandResultRequest struct {
-	CommandID   string `json:"commandId"`
-	Status      string `json:"status"`      // "succeeded" or "failed"
-	CompletedAt string `json:"completedAt"` // ISO-8601 UTC
-	ExitCode    int    `json:"exitCode"`
-	Output      string `json:"output"`
+	Status     string `json:"status"` // "succeeded" or "failed"
+	ExitCode   int    `json:"exitCode"`
+	Output     string `json:"output"`     // backend keeps the first 8192 bytes
+	FinishedAt int64  `json:"finishedAt"` // epoch seconds
 }
 
 // Policy is one policy that contributed to a bundle.

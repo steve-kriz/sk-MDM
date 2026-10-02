@@ -140,12 +140,12 @@ paths:
         - name: max
           in: query
           required: false
-          description: Maximum number of commands to lease.
+          description: Maximum number of commands to lease. Outside 1..25 the request is refused.
           schema:
             type: integer
             minimum: 1
             maximum: 25
-            default: 10
+            default: 5
         - name: X-MDM-Device-Id
           in: header
           required: true
@@ -202,7 +202,7 @@ paths:
         - name: commandId
           in: path
           required: true
-          description: Command id as leased; must equal the body's `commandId`.
+          description: Command id as leased. It names the command on its own; the body does not repeat it.
           schema:
             type: string
         - name: X-MDM-Device-Id
@@ -239,8 +239,16 @@ paths:
             schema:
               $ref: '#/components/schemas/CommandResultRequest'
       responses:
-        '204':
-          description: Result recorded.
+        '200':
+          description: Result recorded (or already recorded; repeated posts are idempotent).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok]
+                properties:
+                  ok:
+                    type: boolean
         '401':
           description: The signature, timestamp or nonce failed verification.
           content:
@@ -524,56 +532,50 @@ components:
     CommandLeaseResponse:
       type: object
       additionalProperties: false
-      required: [deviceId, leasedAt, commands]
+      required: [commands]
       properties:
-        deviceId:
-          type: string
-        leasedAt:
-          type: string
-          format: date-time
-          description: ISO-8601 UTC.
         commands:
           type: array
+          description: The commands now leased to this device, at most `max` of them.
           items:
             type: object
             additionalProperties: false
-            required: [commandId, type, parameters, issuedAt, leaseExpiresAt]
+            required: [commandId, type, payload, issuedAt, expiresAt]
             properties:
               commandId:
                 type: string
               type:
                 type: string
-              parameters:
+              payload:
                 type: object
                 additionalProperties: true
+                description: Command-specific arguments; opaque to the transport.
               issuedAt:
-                type: string
-                format: date-time
-                description: ISO-8601 UTC.
-              leaseExpiresAt:
-                type: string
-                format: date-time
-                description: ISO-8601 UTC.
+                type: integer
+                format: int64
+                description: When the backend queued the command, epoch milliseconds.
+              expiresAt:
+                type: integer
+                format: int64
+                description: After this instant the command is never handed out, epoch milliseconds.
 
     CommandResultRequest:
       type: object
       additionalProperties: false
-      required: [commandId, status, completedAt, exitCode, output]
+      required: [status, exitCode, output, finishedAt]
       properties:
-        commandId:
-          type: string
         status:
           type: string
           enum: [succeeded, failed]
-        completedAt:
-          type: string
-          format: date-time
-          description: ISO-8601 UTC.
         exitCode:
           type: integer
         output:
           type: string
-          description: Combined stdout/stderr, truncated by the agent.
+          description: Combined stdout/stderr. The backend keeps the first 8192 bytes.
+        finishedAt:
+          type: integer
+          format: int64
+          description: When the agent finished the command, epoch seconds.
 
     PolicyBundleResponse:
       type: object
