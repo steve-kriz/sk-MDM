@@ -5,6 +5,7 @@
  * routes on the exported `router` and need no change here.
  */
 import { createRouter, type Router, type RouterRequest, type RouterResponse } from './http/router.js';
+import { registerCommandRoutes, type CommandRouteDeps } from './routes/commands.js';
 
 /** The subset of the Lambda Function URL (payload format 2.0) event we use. */
 export interface FunctionUrlEvent {
@@ -28,6 +29,24 @@ export interface FunctionUrlResponse {
 
 /** The application router. Register routes with `router.add(method, pattern, handler)`. */
 export const router: Router = createRouter();
+
+// The agent command queue. Its dependencies -- the table client and the
+// pepper -- come from the deployment wiring, which hands them over once per
+// cold start; they are resolved per request so registration never depends on
+// the order the module graph loads in.
+let commandRouteDeps: CommandRouteDeps | null = null;
+
+/** Supply the dependencies the agent command routes run with. */
+export function setCommandRouteDeps(deps: CommandRouteDeps): void {
+  commandRouteDeps = deps;
+}
+
+registerCommandRoutes(router, () => {
+  if (commandRouteDeps === null) {
+    throw new Error('command route dependencies are not configured');
+  }
+  return commandRouteDeps;
+});
 
 function parseQuery(rawQueryString: string | undefined): Record<string, string> {
   const query: Record<string, string> = {};
