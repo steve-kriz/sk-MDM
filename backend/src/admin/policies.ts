@@ -14,7 +14,7 @@
  * by a verified admin (see `src/admin/router.ts`), and every dependency is
  * injected, so tests drive them with a stub verifier and a fake table.
  *
- * `settings` is a closed vocabulary: exactly the five keys in
+ * `settings` is a closed vocabulary: exactly the seven keys in
  * `POLICY_SETTING_KEYS`, each of its own type and range. A key this backend
  * does not know is refused rather than stored, because an agent cannot enforce
  * a setting it has never heard of -- storing it would produce a policy the UI
@@ -90,7 +90,23 @@ export const POLICY_SETTING_KEYS = [
   'screenLockTimeoutSeconds',
   'osUpdateMaxAgeDays',
   'localAdminAllowlist',
+  'firewallBlockedDomains',
+  'firewallAllowedDomains',
 ] as const;
+
+/**
+ * What one entry of a domain list must look like: a hostname of at least two
+ * labels, each label alphanumeric with inner hyphens, ending in an alphabetic
+ * top-level label. No scheme, no wildcard, no IP address, no whitespace -- the
+ * agent writes these names into the hosts file, so anything else is refused.
+ */
+export const DOMAIN_PATTERN = /^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
+
+/** Longest accepted domain entry, in characters. */
+export const DOMAIN_MAX_LENGTH = 253;
+
+/** Most entries a domain list may hold. */
+export const DOMAIN_LIST_MAX_ENTRIES = 500;
 
 /** Accepted range of `screenLockTimeoutSeconds`, both bounds inclusive. */
 export const SCREEN_LOCK_TIMEOUT_SECONDS = { min: 60, max: 3600 } as const;
@@ -118,6 +134,17 @@ function inRange(value: unknown, { min, max }: { min: number; max: number }): bo
   return typeof value === 'number' && Number.isInteger(value) && value >= min && value <= max;
 }
 
+/** True when a value is a list of at most 500 valid domain names. */
+function isDomainList(value: unknown): boolean {
+  return (
+    Array.isArray(value) &&
+    value.length <= DOMAIN_LIST_MAX_ENTRIES &&
+    value.every(
+      (entry) => typeof entry === 'string' && entry.length <= DOMAIN_MAX_LENGTH && DOMAIN_PATTERN.test(entry),
+    )
+  );
+}
+
 const SETTING_CHECKS: Readonly<Record<(typeof POLICY_SETTING_KEYS)[number], SettingCheck>> = {
   firewallEnabled: (value) => typeof value === 'boolean',
   diskEncryptionRequired: (value) => typeof value === 'boolean',
@@ -125,6 +152,8 @@ const SETTING_CHECKS: Readonly<Record<(typeof POLICY_SETTING_KEYS)[number], Sett
   osUpdateMaxAgeDays: (value) => inRange(value, OS_UPDATE_MAX_AGE_DAYS),
   localAdminAllowlist: (value) =>
     Array.isArray(value) && value.every((entry) => typeof entry === 'string'),
+  firewallBlockedDomains: isDomainList,
+  firewallAllowedDomains: isDomainList,
 };
 
 /** The string value of an attribute, or `null` when it is not a non-empty string. */

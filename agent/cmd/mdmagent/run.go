@@ -14,6 +14,7 @@ import (
 	"github.com/officehq/sk-mdm/agent/internal/client"
 	"github.com/officehq/sk-mdm/agent/internal/config"
 	"github.com/officehq/sk-mdm/agent/internal/contract"
+	"github.com/officehq/sk-mdm/agent/internal/enforce"
 	"github.com/officehq/sk-mdm/agent/internal/executor"
 	"github.com/officehq/sk-mdm/agent/internal/inventory"
 	"github.com/officehq/sk-mdm/agent/internal/logging"
@@ -198,6 +199,13 @@ func newAgent(env agentEnv) (*agent, error) {
 			return posture.Collect(env.Runner, env.Clock, env.GOOS)
 		},
 		Evaluate: policy.Evaluate,
+		// The settings the bundle asks for are made true on the machine
+		// after they have been evaluated, so this cycle reports the posture
+		// as found and the next one reports the result.
+		Enforce: func(ctx context.Context, effective map[string]any, pst contract.Posture) {
+			enforceLogger := logger.With("enforce")
+			enforce.Run(ctx, enforce.Defaults(env.Runner, env.FS, env.GOOS, enforceLogger), effective, pst, enforceLogger)
+		},
 	}
 
 	// Commands are leased at the end of each cycle, once the check-in has
