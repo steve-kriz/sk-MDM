@@ -1,0 +1,24 @@
+{
+  "deviceId": "dev-001",
+  "leasedAt": "2026-10-02T07:15:02Z",
+  "commands": [
+    {
+      "commandId": "cmd-77",
+      "type": "collect_inventory",
+      "parameters": {},
+      "issuedAt": "2026-10-02T06:59:00Z",
+      "leaseExpiresAt": "2026-10-02T07:20:02Z"
+    },
+    {
+      "commandId": "cmd-78",
+      "type": "run_script",
+      "parameters": {
+        "shell": "powershell",
+        "script": "Get-Service -Name Spooler",
+        "timeoutSeconds": 120
+      },
+      "issuedAt": "2026-10-02T07:01:30Z",
+      "leaseExpiresAt": "2026-10-02T07:20:02Z"
+    }
+  ]
+}

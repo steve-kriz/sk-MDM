@@ -1,0 +1,634 @@
+openapi: 3.0.3
+info:
+  title: SK-MDM agent API
+  version: 1.0.0
+  description: |
+    The frozen wire contract between the SK-MDM device agent and the backend
+    Lambda.
+
+    Two authentication schemes exist on this API:
+
+    * `POST /api/v1/enroll` is authenticated **only** by the
+      `X-MDM-Enrollment-Token` header carried over TLS. At enroll time the agent
+      has no `deviceId` and no device secret, so the device HMAC scheme cannot
+      be applied and is not declared on that operation. The token is presented
+      as `<tokenId>.<secret>`: `tokenId` locates the stored token record and the
+      full presented string is what the backend hashes for comparison.
+    * Every `/api/v1/devices/...` operation is authenticated by the device HMAC
+      scheme: `X-MDM-Device-Id`, `X-MDM-Timestamp`, `X-MDM-Nonce` and
+      `X-MDM-Signature`, all required. The signature covers the canonical string
+      `METHOD\npath\ncanonicalQuery\nsha256hex(body)\ntimestamp\nnonce\ndeviceId`
+      and is rendered as `v1=` plus 64 lower-case hex characters. See
+      `contract/README.md`.
+
+    Field names in this document are pinned against
+    `backend/src/contract/types.ts`, `agent/internal/contract/types.go` and the
+    golden messages in `contract/testdata/messages/`.
+
+servers:
+  - url: https://api.example.invalid
+    description: Lambda Function URL; the real host is supplied at deploy time.
+
+paths:
+  /api/v1/enroll:
+    post:
+      operationId: enrollDevice
+      summary: Enroll a device and receive its id and HMAC secret
+      description: |
+        Authenticated by the enrollment token alone. None of the device HMAC
+        headers apply here: the agent has no device id and no device secret
+        until this call succeeds.
+      parameters:
+        - name: X-MDM-Enrollment-Token
+          in: header
+          required: true
+          description: Enrollment token presented as `<tokenId>.<secret>`.
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{16}\.[0-9a-f]{64}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EnrollRequest'
+      responses:
+        '200':
+          description: Device enrolled. The device secret is returned exactly once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollResponse'
+        '401':
+          description: The enrollment token is missing, malformed, unknown, used or expired.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/devices/{deviceId}/checkin:
+    post:
+      operationId: checkIn
+      summary: Report inventory, posture and policy compliance
+      description: Authenticated by the device HMAC scheme.
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          description: Device id issued by enrollment.
+          schema:
+            type: string
+        - name: X-MDM-Device-Id
+          in: header
+          required: true
+          description: Device id; must equal the `deviceId` path parameter.
+          schema:
+            type: string
+        - name: X-MDM-Timestamp
+          in: header
+          required: true
+          description: epoch seconds
+          schema:
+            type: integer
+            format: int64
+            description: epoch seconds
+        - name: X-MDM-Nonce
+          in: header
+          required: true
+          description: Single-use random value, replayed requests are rejected.
+          schema:
+            type: string
+        - name: X-MDM-Signature
+          in: header
+          required: true
+          description: '`v1=` followed by 64 lower-case hex characters.'
+          schema:
+            type: string
+            pattern: '^v1=[0-9a-f]{64}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckInRequest'
+      responses:
+        '200':
+          description: Check-in accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckInResponse'
+        '401':
+          description: The signature, timestamp or nonce failed verification.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/devices/{deviceId}/commands:
+    get:
+      operationId: leaseCommands
+      summary: Lease the commands waiting for this device
+      description: Authenticated by the device HMAC scheme.
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          description: Device id issued by enrollment.
+          schema:
+            type: string
+        - name: max
+          in: query
+          required: false
+          description: Maximum number of commands to lease.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 25
+            default: 10
+        - name: X-MDM-Device-Id
+          in: header
+          required: true
+          description: Device id; must equal the `deviceId` path parameter.
+          schema:
+            type: string
+        - name: X-MDM-Timestamp
+          in: header
+          required: true
+          description: epoch seconds
+          schema:
+            type: integer
+            format: int64
+            description: epoch seconds
+        - name: X-MDM-Nonce
+          in: header
+          required: true
+          description: Single-use random value, replayed requests are rejected.
+          schema:
+            type: string
+        - name: X-MDM-Signature
+          in: header
+          required: true
+          description: '`v1=` followed by 64 lower-case hex characters.'
+          schema:
+            type: string
+            pattern: '^v1=[0-9a-f]{64}$'
+      responses:
+        '200':
+          description: The commands now leased to this device; `commands` may be empty.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CommandLeaseResponse'
+        '401':
+          description: The signature, timestamp or nonce failed verification.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/devices/{deviceId}/commands/{commandId}/result:
+    post:
+      operationId: reportCommandResult
+      summary: Report the terminal result of a leased command
+      description: Authenticated by the device HMAC scheme.
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          description: Device id issued by enrollment.
+          schema:
+            type: string
+        - name: commandId
+          in: path
+          required: true
+          description: Command id as leased; must equal the body's `commandId`.
+          schema:
+            type: string
+        - name: X-MDM-Device-Id
+          in: header
+          required: true
+          description: Device id; must equal the `deviceId` path parameter.
+          schema:
+            type: string
+        - name: X-MDM-Timestamp
+          in: header
+          required: true
+          description: epoch seconds
+          schema:
+            type: integer
+            format: int64
+            description: epoch seconds
+        - name: X-MDM-Nonce
+          in: header
+          required: true
+          description: Single-use random value, replayed requests are rejected.
+          schema:
+            type: string
+        - name: X-MDM-Signature
+          in: header
+          required: true
+          description: '`v1=` followed by 64 lower-case hex characters.'
+          schema:
+            type: string
+            pattern: '^v1=[0-9a-f]{64}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandResultRequest'
+      responses:
+        '204':
+          description: Result recorded.
+        '401':
+          description: The signature, timestamp or nonce failed verification.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such command is leased to this device.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/devices/{deviceId}/policies:
+    get:
+      operationId: getPolicyBundle
+      summary: Fetch the merged policy bundle for this device
+      description: Authenticated by the device HMAC scheme.
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          description: Device id issued by enrollment.
+          schema:
+            type: string
+        - name: X-MDM-Device-Id
+          in: header
+          required: true
+          description: Device id; must equal the `deviceId` path parameter.
+          schema:
+            type: string
+        - name: X-MDM-Timestamp
+          in: header
+          required: true
+          description: epoch seconds
+          schema:
+            type: integer
+            format: int64
+            description: epoch seconds
+        - name: X-MDM-Nonce
+          in: header
+          required: true
+          description: Single-use random value, replayed requests are rejected.
+          schema:
+            type: string
+        - name: X-MDM-Signature
+          in: header
+          required: true
+          description: '`v1=` followed by 64 lower-case hex characters.'
+          schema:
+            type: string
+            pattern: '^v1=[0-9a-f]{64}$'
+      responses:
+        '200':
+          description: The merged bundle. `conflicts` is `[]` when nothing is contested.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyBundleResponse'
+        '401':
+          description: The signature, timestamp or nonce failed verification.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+          description: Stable machine-readable error key, e.g. `not_found`.
+
+    EnrollRequest:
+      type: object
+      additionalProperties: false
+      required: [hostname, platform, osVersion, agentVersion, serialNumber, enrolledAt]
+      properties:
+        hostname:
+          type: string
+        platform:
+          type: string
+          enum: [windows, macos]
+        osVersion:
+          type: string
+        agentVersion:
+          type: string
+        serialNumber:
+          type: string
+        enrolledAt:
+          type: string
+          format: date-time
+          description: ISO-8601 UTC.
+
+    EnrollResponse:
+      type: object
+      additionalProperties: false
+      required: [deviceId, deviceSecret, checkInIntervalSeconds, serverTime]
+      properties:
+        deviceId:
+          type: string
+        deviceSecret:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: Lower-case hex HMAC key. Returned exactly once.
+        checkInIntervalSeconds:
+          type: integer
+        serverTime:
+          type: string
+          format: date-time
+          description: ISO-8601 UTC.
+
+    Inventory:
+      type: object
+      additionalProperties: false
+      required: [hardware, os, software]
+      properties:
+        hardware:
+          type: object
+          additionalProperties: false
+          required: [manufacturer, model, serialNumber, cpu, ramBytes, diskBytes]
+          properties:
+            manufacturer:
+              type: string
+            model:
+              type: string
+            serialNumber:
+              type: string
+            cpu:
+              type: string
+            ramBytes:
+              type: integer
+              format: int64
+            diskBytes:
+              type: integer
+              format: int64
+        os:
+          type: object
+          additionalProperties: false
+          required: [name, version, build, architecture]
+          properties:
+            name:
+              type: string
+            version:
+              type: string
+            build:
+              type: string
+            architecture:
+              type: string
+        software:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, version, publisher, installedAt]
+            properties:
+              name:
+                type: string
+              version:
+                type: string
+              publisher:
+                type: string
+              installedAt:
+                type: string
+                format: date-time
+                description: ISO-8601 UTC.
+        warnings:
+          type: array
+          description: Collector problems. Omitted entirely when there are none.
+          items:
+            type: string
+
+    Posture:
+      type: object
+      additionalProperties: false
+      required: [diskEncryption, firewall, antivirus, osUpdate, localAdmins]
+      properties:
+        diskEncryption:
+          type: object
+          additionalProperties: false
+          required: [enabled, method]
+          properties:
+            enabled:
+              type: boolean
+            method:
+              type: string
+              enum: [bitlocker, filevault]
+        firewall:
+          type: object
+          additionalProperties: false
+          required: [enabled]
+          properties:
+            enabled:
+              type: boolean
+        antivirus:
+          type: object
+          additionalProperties: false
+          required: [name, enabled, definitionsAgeDays]
+          properties:
+            name:
+              type: string
+            enabled:
+              type: boolean
+            definitionsAgeDays:
+              type: integer
+        osUpdate:
+          type: object
+          additionalProperties: false
+          required: [lastCheckedAt, pendingCount, rebootRequired]
+          properties:
+            lastCheckedAt:
+              type: string
+              format: date-time
+              description: ISO-8601 UTC.
+            pendingCount:
+              type: integer
+            rebootRequired:
+              type: boolean
+        localAdmins:
+          type: array
+          items:
+            type: string
+        warnings:
+          type: array
+          description: Collector problems. Omitted entirely when there are none.
+          items:
+            type: string
+
+    CheckInRequest:
+      type: object
+      additionalProperties: false
+      required: [collectedAt, inventory, posture]
+      properties:
+        collectedAt:
+          type: string
+          format: date-time
+          description: ISO-8601 UTC.
+        inventory:
+          $ref: '#/components/schemas/Inventory'
+        posture:
+          $ref: '#/components/schemas/Posture'
+        policyCompliance:
+          type: array
+          description: Omitted entirely when the agent has nothing to report.
+          items:
+            type: object
+            additionalProperties: false
+            required: [policyId, version, compliant, violations]
+            properties:
+              policyId:
+                type: string
+              version:
+                type: integer
+              compliant:
+                type: boolean
+              violations:
+                type: array
+                description: Violation keys such as `firewall_disabled`. Empty when compliant.
+                items:
+                  type: string
+
+    CheckInResponse:
+      type: object
+      additionalProperties: false
+      required: [deviceId, receivedAt, nextCheckInSeconds, pendingCommandCount]
+      properties:
+        deviceId:
+          type: string
+        receivedAt:
+          type: string
+          format: date-time
+          description: ISO-8601 UTC.
+        nextCheckInSeconds:
+          type: integer
+        pendingCommandCount:
+          type: integer
+
+    CommandLeaseResponse:
+      type: object
+      additionalProperties: false
+      required: [deviceId, leasedAt, commands]
+      properties:
+        deviceId:
+          type: string
+        leasedAt:
+          type: string
+          format: date-time
+          description: ISO-8601 UTC.
+        commands:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [commandId, type, parameters, issuedAt, leaseExpiresAt]
+            properties:
+              commandId:
+                type: string
+              type:
+                type: string
+              parameters:
+                type: object
+                additionalProperties: true
+              issuedAt:
+                type: string
+                format: date-time
+                description: ISO-8601 UTC.
+              leaseExpiresAt:
+                type: string
+                format: date-time
+                description: ISO-8601 UTC.
+
+    CommandResultRequest:
+      type: object
+      additionalProperties: false
+      required: [commandId, status, completedAt, exitCode, output]
+      properties:
+        commandId:
+          type: string
+        status:
+          type: string
+          enum: [succeeded, failed]
+        completedAt:
+          type: string
+          format: date-time
+          description: ISO-8601 UTC.
+        exitCode:
+          type: integer
+        output:
+          type: string
+          description: Combined stdout/stderr, truncated by the agent.
+
+    PolicyBundleResponse:
+      type: object
+      additionalProperties: false
+      required: [deviceId, generatedAt, policies, effectiveSettings, conflicts]
+      properties:
+        deviceId:
+          type: string
+        generatedAt:
+          type: string
+          format: date-time
+          description: ISO-8601 UTC.
+        policies:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [policyId, version, settings]
+            properties:
+              policyId:
+                type: string
+              version:
+                type: integer
+              settings:
+                type: object
+                additionalProperties: true
+        effectiveSettings:
+          type: object
+          additionalProperties: true
+          description: 'The merge result: setting key to winning value.'
+        conflicts:
+          type: array
+          description: Always present; `[]` when nothing is contested.
+          items:
+            type: object
+            additionalProperties: false
+            required: [key, winningPolicyId, value, losers]
+            properties:
+              key:
+                type: string
+              winningPolicyId:
+                type: string
+                description: Also appears in `policies`.
+              value:
+                description: The winning value, identical to `effectiveSettings[key]`.
+              losers:
+                type: array
+                minItems: 1
+                items:
+                  type: object
+                  additionalProperties: false
+                  required: [policyId, value]
+                  properties:
+                    policyId:
+                      type: string
+                    value:
+                      description: The value this policy wanted and lost with.

@@ -1,0 +1,56 @@
+{
+  "collectedAt": "2026-10-02T07:15:00Z",
+  "inventory": {
+    "hardware": {
+      "manufacturer": "Dell Inc.",
+      "model": "Latitude 7440",
+      "serialNumber": "JH4K7Z2",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-1365U",
+      "ramBytes": 34359738368,
+      "diskBytes": 1023741952000
+    },
+    "os": {
+      "name": "Windows 11 Enterprise",
+      "version": "10.0.22631",
+      "build": "22631.4317",
+      "architecture": "x86_64"
+    },
+    "software": [
+      {
+        "name": "Google Chrome",
+        "version": "129.0.6668.90",
+        "publisher": "Google LLC",
+        "installedAt": "2026-09-18T04:02:11Z"
+      },
+      {
+        "name": "7-Zip 24.08",
+        "version": "24.08",
+        "publisher": "Igor Pavlov",
+        "installedAt": "2026-08-01T22:40:00Z"
+      }
+    ]
+  },
+  "posture": {
+    "diskEncryption": {
+      "enabled": true,
+      "method": "bitlocker"
+    },
+    "firewall": {
+      "enabled": true
+    },
+    "antivirus": {
+      "name": "Microsoft Defender Antivirus",
+      "enabled": true,
+      "definitionsAgeDays": 1
+    },
+    "osUpdate": {
+      "lastCheckedAt": "2026-10-01T18:30:00Z",
+      "pendingCount": 3,
+      "rebootRequired": false
+    },
+    "localAdmins": [
+      "CONTOSO\\skrizanovic",
+      "BUILTIN\\Administrator"
+    ]
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "commandId": "cmd-77",
+  "status": "succeeded",
+  "completedAt": "2026-10-02T07:15:30Z",
+  "exitCode": 0,
+  "output": "inventory collected: 412 packages"
+}

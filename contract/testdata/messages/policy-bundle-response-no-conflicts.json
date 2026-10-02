@@ -1,0 +1,21 @@
+{
+  "deviceId": "dev-003",
+  "generatedAt": "2026-10-02T07:16:40Z",
+  "policies": [
+    {
+      "policyId": "pol-baseline",
+      "version": 4,
+      "settings": {
+        "firewall.enabled": true,
+        "diskEncryption.required": true,
+        "screenLock.timeoutSeconds": 900
+      }
+    }
+  ],
+  "effectiveSettings": {
+    "firewall.enabled": true,
+    "diskEncryption.required": true,
+    "screenLock.timeoutSeconds": 900
+  },
+  "conflicts": []
+}
