@@ -5,7 +5,7 @@
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc -p tsconfig.json && node scripts/copy-ui.mjs",
+    "build": "tsc -p tsconfig.json && node scripts/copy-ui.mjs && node scripts/write-dist-package.mjs",
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
   },
   "devDependencies": {
