@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 	"time"
@@ -877,13 +878,8 @@ func TestScenario_LogsAreDeliveredLocally(t *testing.T) {
 	}
 }
 
-// TestScenario_OversizedLogArchiveIsRefused tests large log archive handling.
-// Note: This tests the mechanism, but creating data large enough to exceed
-// 20MB after zip compression is difficult in a test. The real threshold test
-// would need files that don't compress (e.g., pre-compressed data).
+// TestScenario_OversizedLogArchiveIsRefused tests that archives exceeding 20MB are rejected.
 func TestScenario_OversizedLogArchiveIsRefused(t *testing.T) {
-	// This test verifies that the oversized archive check is implemented
-	// by verifying the output includes the path and size in success case
 	fs := fake.NewFS()
 
 	deps := &Deps{
@@ -893,11 +889,23 @@ func TestScenario_OversizedLogArchiveIsRefused(t *testing.T) {
 		GOOS:   "darwin",
 	}
 
-	logPath := "/Library/Application Support/OfficeHQ/MDM/logs/agent.log"
-	logData := make([]byte, 1024*100) // 100 KB
-	fs.Seed(logPath, logData)
+	// Create incompressible data using math/rand with fixed seed
+	// 25 MB of random data that won't compress
+	rng := rand.New(rand.NewSource(42))
+	logDir := "/Library/Application Support/OfficeHQ/MDM/logs"
 
-	deps.LogDir = "/Library/Application Support/OfficeHQ/MDM/logs"
+	// Create 5 files of 5 MB each = 25 MB total
+	// This ensures the zip will exceed the 20971520 byte limit (20 MB)
+	for i := 0; i < 5; i++ {
+		logPath := fmt.Sprintf("%s/log%d.bin", logDir, i)
+		data := make([]byte, 5*1024*1024) // 5 MB
+		for j := 0; j < len(data); j++ {
+			data[j] = byte(rng.Intn(256))
+		}
+		fs.Seed(logPath, data)
+	}
+
+	deps.LogDir = logDir
 
 	cmd := Command{
 		CommandID: "oversized-logs",
@@ -907,12 +915,27 @@ func TestScenario_OversizedLogArchiveIsRefused(t *testing.T) {
 
 	result := Execute(context.Background(), cmd, deps)
 
-	// Verify successful archive includes path and size info
-	if result.Status != StatusSucceeded {
-		t.Errorf("expected status 'succeeded', got '%s'", result.Status)
+	// Assert status is failed
+	if result.Status != StatusFailed {
+		t.Errorf("expected status 'failed', got '%s'", result.Status)
 	}
-	if !strings.Contains(result.Output, "bytes") {
-		t.Errorf("expected output to include 'bytes', got '%s'", result.Output)
+
+	// Assert exitCode is -1
+	if result.ExitCode != FailureExitCode {
+		t.Errorf("expected exitCode -1, got %d", result.ExitCode)
+	}
+
+	// Assert output first line is "error: logs_too_large"
+	if !strings.HasPrefix(result.Output, "error: logs_too_large") {
+		t.Errorf("expected output to start with 'error: logs_too_large', got '%s'", result.Output)
+	}
+
+	// Assert the archive file was deleted (no zip files remain)
+	paths := fs.Paths()
+	for _, path := range paths {
+		if strings.Contains(path, "mdm-logs-") && strings.HasSuffix(path, ".zip") {
+			t.Errorf("expected archive to be deleted, but found: %s", path)
+		}
 	}
 }
 
