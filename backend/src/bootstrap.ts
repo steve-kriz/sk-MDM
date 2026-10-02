@@ -15,6 +15,7 @@
  * by `createSecretsClientAdapter`, so a real Command always reaches the SDK.
  */
 import { createTokenVerifier } from './auth/entra.js';
+import { createUserTokenVerifier } from './auth/userToken.js';
 import { createSdkDocumentClientAdapter, type SdkDocumentClient } from './aws/documentClient.js';
 import { createJwksFetcher, type FetchLike } from './aws/jwks.js';
 import { createSecretsClientAdapter, type SdkSecretsClient } from './aws/secrets.js';
@@ -25,6 +26,7 @@ import {
   configureCheckInRoute,
   configureEnrollRoute,
   configurePolicyBundleRoute,
+  configureUserSessionRoute,
   setCommandRouteDeps,
 } from './index.js';
 import type { TokenVerifier } from './auth/entra.js';
@@ -95,19 +97,23 @@ export async function bootstrap({
   });
   const pepper = await getPepper();
 
+  const jwksFetcher = createJwksFetcher(tenantId, fetchImpl as FetchLike);
   const verifier = createTokenVerifier({
     tenantId,
     clientId,
-    jwksFetcher: createJwksFetcher(tenantId, fetchImpl as FetchLike),
+    jwksFetcher,
     now: epochSeconds,
     adminGroupId: env.ENTRA_ADMIN_GROUP_ID ?? '',
   });
+  // TASK-031: the agent user token verifier shares the tenant, client and JWKS fetcher.
+  const userVerifier = createUserTokenVerifier({ tenantId, clientId, jwksFetcher, now: epochSeconds });
 
   configureEnrollRoute({ table, pepper });
   configureCheckInRoute({ table, pepper });
   configurePolicyBundleRoute({ table, pepper });
   configureAdminRoutes({ verifier, table });
   setCommandRouteDeps({ table, pepper, now: epochSeconds });
+  configureUserSessionRoute({ table, pepper, now: epochSeconds, userVerifier });
 
   return { table, verifier };
 }

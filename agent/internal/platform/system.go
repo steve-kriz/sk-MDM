@@ -17,10 +17,11 @@ type OSFileSystem struct{}
 
 // Compile-time proof the real implementations satisfy the interfaces.
 var (
-	_ FileSystem    = OSFileSystem{}
-	_ CommandRunner = ExecRunner{}
-	_ Clock         = SystemClock{}
-	_ HTTPDoer      = (*http.Client)(nil)
+	_ FileSystem      = OSFileSystem{}
+	_ CommandRunner   = ExecRunner{}
+	_ Clock           = SystemClock{}
+	_ HTTPDoer        = (*http.Client)(nil)
+	_ SecretProtector = SystemProtector{}
 )
 
 // ReadFile reads the whole file at path.

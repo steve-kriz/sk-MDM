@@ -90,3 +90,17 @@ type Clock interface {
 type HTTPDoer interface {
 	Do(req *http.Request) (*http.Response, error)
 }
+
+// SecretProtector encrypts a secret at rest so it can be written to a file.
+//
+// On Windows it is DPAPI with machine scope, so a blob written by an elevated
+// CLI can still be read back by the service running as LocalSystem. Elsewhere
+// it is the identity: the file's 0600 root-owned mode is the protection, as it
+// is for the device secret in state.json.
+type SecretProtector interface {
+	// Protect returns the encrypted form of plaintext.
+	Protect(plaintext []byte) ([]byte, error)
+
+	// Unprotect reverses Protect.
+	Unprotect(ciphertext []byte) ([]byte, error)
+}

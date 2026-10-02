@@ -315,7 +315,127 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /api/v1/agent-auth/config:
+    get:
+      operationId: getAgentAuthConfig
+      summary: Fetch the Entra ID sign-in configuration for `mdmagent login`
+      description: |
+        Unauthenticated. Publishes only what a public client needs to start the
+        OAuth 2.0 device authorization grant (RFC 8628): the tenant id, the
+        application (client) id and the scopes to request. No other server-side
+        value is ever included.
+      security: []
+      responses:
+        '200':
+          description: The agent sign-in configuration.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentAuthConfig'
+        '500':
+          description: '`not_configured`: `ENTRA_TENANT_ID` or `ENTRA_CLIENT_ID` is not set.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/devices/{deviceId}/user-session:
+    post:
+      operationId: postUserSession
+      summary: Report the Entra user signed in on this device
+      description: |
+        Authenticated by the device HMAC scheme **and** the signed-in user's
+        Entra access token in `Authorization: Bearer <token>`. The bearer is not
+        part of the HMAC canonical string. The token must carry the delegated
+        scope `MDM.Agent`. The request body is empty.
+
+        Checks run in order and the first failure answers: the device HMAC
+        (its own 401/403/500), then `device_mismatch` (403), then
+        `user_token_missing` (403), then `jwks_unavailable` (503), then
+        `user_token_invalid` (403). A bearer problem never answers 401, which is
+        reserved for the device credential.
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          description: Device id issued by enrollment.
+          schema:
+            type: string
+        - name: X-MDM-Device-Id
+          in: header
+          required: true
+          description: Device id; must equal the `deviceId` path parameter.
+          schema:
+            type: string
+        - name: X-MDM-Timestamp
+          in: header
+          required: true
+          description: epoch seconds
+          schema:
+            type: integer
+            format: int64
+            description: epoch seconds
+        - name: X-MDM-Nonce
+          in: header
+          required: true
+          description: Single-use random value, replayed requests are rejected.
+          schema:
+            type: string
+        - name: X-MDM-Signature
+          in: header
+          required: true
+          description: '`v1=` followed by 64 lower-case hex characters.'
+          schema:
+            type: string
+            pattern: '^v1=[0-9a-f]{64}$'
+      responses:
+        '200':
+          description: The user was verified and recorded as signed in on the device.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserSessionResponse'
+        '401':
+          description: The device signature, timestamp or nonce failed verification.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: |
+            `device_revoked`, `device_mismatch` (the path names another device),
+            `user_token_missing` (no `Authorization: Bearer <token>`) or
+            `user_token_invalid` (the user token failed verification).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: '`device_secret_unreadable`, or `internal_error` when the route is not configured.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: '`jwks_unavailable`: the tenant signing keys could not be fetched.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
 components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        The signed-in user's Entra ID access token (scope `MDM.Agent`), sent in
+        addition to the device HMAC headers. Required only by
+        `POST /api/v1/devices/{deviceId}/user-session`.
+
   schemas:
     Error:
       type: object
@@ -662,3 +782,39 @@ components:
                       type: string
                     value:
                       description: The value this policy wanted and lost with.
+
+    AgentAuthConfig:
+      type: object
+      additionalProperties: false
+      required: [tenantId, clientId, scopes]
+      properties:
+        tenantId:
+          type: string
+        clientId:
+          type: string
+        scopes:
+          type: array
+          description: '`api://<clientId>/MDM.Agent`, `offline_access`, `openid`, `profile`.'
+          items:
+            type: string
+
+    UserSessionResponse:
+      type: object
+      additionalProperties: false
+      required: [user]
+      properties:
+        user:
+          type: object
+          additionalProperties: false
+          required: [oid, upn, name]
+          properties:
+            oid:
+              type: string
+            upn:
+              type: string
+              nullable: true
+              description: The token's `preferred_username`, or null.
+            name:
+              type: string
+              nullable: true
+              description: The token's `name`, or null.

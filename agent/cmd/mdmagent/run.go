@@ -24,6 +24,7 @@ import (
 	"github.com/officehq/sk-mdm/agent/internal/service"
 	"github.com/officehq/sk-mdm/agent/internal/state"
 	"github.com/officehq/sk-mdm/agent/internal/update"
+	"github.com/officehq/sk-mdm/agent/internal/userauth"
 	"github.com/officehq/sk-mdm/agent/internal/version"
 )
 
@@ -104,6 +105,10 @@ type agentEnv struct {
 	// means the agent cannot update itself, and an advertised release is
 	// left alone.
 	BinaryPath string
+
+	// Protector decrypts the user token vault. Nil means the host's
+	// platform.SecretProtector.
+	Protector platform.SecretProtector
 }
 
 // agent is the assembled agent: the dependencies one check-in cycle runs from,
@@ -141,6 +146,17 @@ func newAgent(env agentEnv) (*agent, error) {
 		Platform:     client.PlatformName(env.GOOS),
 		AgentVersion: version.Version,
 	}
+
+	// The signed-in user's token rides on every signed request while one is
+	// held. The vault is the one `mdmagent login` writes; it is read per call.
+	protector := env.Protector
+	if protector == nil {
+		protector = newProtector()
+	}
+	userSession := userauth.NewSession(
+		userauth.NewVault(env.FS, protector, userauth.VaultPath(env.GOOS)),
+		env.Doer, env.Clock, logger.With("userauth"))
+	transport.Bearer = userSession
 
 	commands := &executor.Deps{
 		Runner: env.Runner,
@@ -209,6 +225,9 @@ func newAgent(env agentEnv) (*agent, error) {
 		if err != nil {
 			return err
 		}
+		// The signed-in user is reported first; whatever comes of it, the
+		// command poll still runs this cycle.
+		reportUserSession(ctx, transport, userSession, st.DeviceID, logger.With("userauth"))
 		commands.DeviceID = st.DeviceID
 		return executor.Poll(ctx, commands)
 	}

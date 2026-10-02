@@ -8,7 +8,9 @@
 package fake
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io/fs"
 	"net/http"
 	"sort"
@@ -21,10 +23,11 @@ import (
 
 // Compile-time proof the fakes satisfy the interfaces they stand in for.
 var (
-	_ platform.FileSystem    = (*FS)(nil)
-	_ platform.CommandRunner = (*CommandRunner)(nil)
-	_ platform.Clock         = (*Clock)(nil)
-	_ platform.HTTPDoer      = (*HTTPDoer)(nil)
+	_ platform.FileSystem      = (*FS)(nil)
+	_ platform.CommandRunner   = (*CommandRunner)(nil)
+	_ platform.Clock           = (*Clock)(nil)
+	_ platform.HTTPDoer        = (*HTTPDoer)(nil)
+	_ platform.SecretProtector = (*SecretProtector)(nil)
 )
 
 // FS is an in-memory platform.FileSystem.
@@ -534,3 +537,52 @@ type bodyReader struct {
 }
 
 func (b *bodyReader) Close() error { return nil }
+
+// fakeProtectedPrefix marks a blob the fake SecretProtector produced.
+const fakeProtectedPrefix = "FAKE-PROTECTED:"
+
+// errNotProtected is what Unprotect returns for bytes Protect never produced.
+var errNotProtected = errors.New("fake: data was not protected by this protector")
+
+// SecretProtector is an in-memory platform.SecretProtector with a reversible
+// transform: a fixed prefix followed by every byte XOR 0xA5. The protected form
+// therefore never contains the plaintext, yet a test can still decode it.
+//
+// ProtectErr and UnprotectErr, when non-nil, are returned by that operation
+// instead of doing any work.
+type SecretProtector struct {
+	ProtectErr   error
+	UnprotectErr error
+}
+
+// NewSecretProtector returns a protector with no failure arranged.
+func NewSecretProtector() *SecretProtector { return &SecretProtector{} }
+
+// Protect applies the reversible transform.
+func (p *SecretProtector) Protect(plaintext []byte) ([]byte, error) {
+	if p.ProtectErr != nil {
+		return nil, p.ProtectErr
+	}
+	out := make([]byte, 0, len(fakeProtectedPrefix)+len(plaintext))
+	out = append(out, fakeProtectedPrefix...)
+	for _, b := range plaintext {
+		out = append(out, b^0xA5)
+	}
+	return out, nil
+}
+
+// Unprotect reverses Protect, failing for bytes Protect did not produce.
+func (p *SecretProtector) Unprotect(ciphertext []byte) ([]byte, error) {
+	if p.UnprotectErr != nil {
+		return nil, p.UnprotectErr
+	}
+	if !bytes.HasPrefix(ciphertext, []byte(fakeProtectedPrefix)) {
+		return nil, errNotProtected
+	}
+	body := ciphertext[len(fakeProtectedPrefix):]
+	out := make([]byte, len(body))
+	for i, b := range body {
+		out[i] = b ^ 0xA5
+	}
+	return out, nil
+}

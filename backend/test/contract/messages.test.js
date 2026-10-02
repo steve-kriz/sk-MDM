@@ -22,7 +22,10 @@ test('OpenAPI defines the five device operations', async (t) => {
     'POST /api/v1/devices/{deviceId}/checkin',
     'GET /api/v1/devices/{deviceId}/commands',
     'POST /api/v1/devices/{deviceId}/commands/{commandId}/result',
-    'GET /api/v1/devices/{deviceId}/policies'
+    'GET /api/v1/devices/{deviceId}/policies',
+    // TASK-031
+    'GET /api/v1/agent-auth/config',
+    'POST /api/v1/devices/{deviceId}/user-session'
   ];
 
   // Count operations
@@ -38,7 +41,7 @@ test('OpenAPI defines the five device operations', async (t) => {
 
   // When I parse contract/openapi.yaml
   // Then exactly the five documented method+path pairs are present
-  assert.equal(ops.length, 5, 'should have exactly 5 operations');
+  assert.equal(ops.length, expectedOps.length, 'should have exactly the documented operations');
   for (const expectedOp of expectedOps) {
     assert.ok(ops.includes(expectedOp), `operation ${expectedOp} should be present`);
   }

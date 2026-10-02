@@ -17,6 +17,7 @@ import { registerCommandRoutes, type CommandRouteDeps } from './routes/commands.
 import { registerPolicyBundleRoute, resolvePolicyBundleDependencies } from './routes/policies.js';
 
 import { registerEnrollRoute, resolveEnrollDependencies } from './routes/enroll.js';
+import { registerUserSessionRoutes, resolveUserSessionDependencies } from './routes/userSession.js';
 import { registerUiRoutes } from './ui/index.js';
 
 /** The subset of the Lambda Function URL (payload format 2.0) event we use. */
@@ -302,6 +303,34 @@ export {
   registerAgentReleaseRoutes,
 } from './admin/agentRelease.js';
 // --- end TASK-022 ----------------------------------------------------------
+
+// --- TASK-031: agent user sign-in -------------------------------------------
+// `GET /api/v1/agent-auth/config` is public: it publishes the tenant, client
+// and scopes the agent's device authorization grant needs. The user-session
+// route is a device route authenticated inside its handler by
+// `verifyDeviceRequest`, plus the signed-in user's Entra bearer token. Its
+// dependencies are resolved on each request: start-up calls
+// `configureUserSessionRoute({ table, pepper, now, userVerifier })`.
+registerUserSessionRoutes(router, resolveUserSessionDependencies);
+export {
+  AGENT_AUTH_CONFIG_PATH,
+  USER_SESSION_PATH,
+  agentAuthConfig,
+  configureUserSessionRoute,
+  createUserSessionHandler,
+  registerUserSessionRoutes,
+  resolveUserSessionDependencies,
+} from './routes/userSession.js';
+export type {
+  AgentAuthConfig,
+  UserSessionDependencies,
+  UserSessionTable,
+  UserVerifier,
+} from './routes/userSession.js';
+export { AGENT_SCOPE_NAME, createUserTokenVerifier } from './auth/userToken.js';
+export type { UserTokenVerifier, UserTokenVerifierOptions } from './auth/userToken.js';
+export { deviceSignedInUser } from './db/keys.js';
+// --- end TASK-031 ----------------------------------------------------------
 
 function parseQuery(rawQueryString: string | undefined): Record<string, string> {
   const query: Record<string, string> = {};

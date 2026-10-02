@@ -53,7 +53,16 @@ const (
 	// HeaderEnrollmentToken authenticates POST /api/v1/enroll, and nothing
 	// else.
 	HeaderEnrollmentToken = "X-MDM-Enrollment-Token"
+	// HeaderAuthorization carries the signed-in user's bearer token, when
+	// one is held. It is not signed.
+	HeaderAuthorization = "Authorization"
 )
+
+// BearerSource supplies the signed-in user's access token for Do. It returns
+// false when no user is signed in or no valid token can be had.
+type BearerSource interface {
+	BearerToken(ctx context.Context) (string, bool)
+}
 
 // NonceBytes is the random length behind a nonce; hex-encoded it is the 32
 // characters the contract requires.
@@ -100,6 +109,13 @@ type Client struct {
 	// failures. Nothing written here carries the device secret or the
 	// enrollment token.
 	Logger *logging.Logger
+
+	// Bearer, when non-nil, supplies the signed-in user's access token. Do
+	// sends it as "Authorization: Bearer <token>" in addition to the device
+	// signature -- it is never part of the signed canonical string -- and
+	// sends no Authorization header when Bearer is nil or holds no token.
+	// The token is never logged.
+	Bearer BearerSource
 
 	// checkInIntervalSeconds is what the last enrollment asked for; see
 	// CheckInIntervalSeconds.
@@ -177,6 +193,13 @@ func (c *Client) Do(method, path string, body []byte) (*http.Response, error) {
 	req.Header.Set(HeaderNonce, nonce)
 	req.Header.Set(HeaderSignature, signature)
 
+	// The user token rides alongside the signature, after it was computed.
+	if c.Bearer != nil {
+		if token, ok := c.Bearer.BearerToken(req.Context()); ok && token != "" {
+			req.Header.Set(HeaderAuthorization, "Bearer "+token)
+		}
+	}
+
 	resp, err := c.doer.Do(req)
 	if err != nil {
 		c.log(logging.LevelWarn, "request failed",
@@ -198,6 +221,39 @@ func (c *Client) Do(method, path string, body []byte) (*http.Response, error) {
 		closeBody(resp)
 		return nil, ErrUnauthorized
 	}
+	return resp, nil
+}
+
+// FetchPublic sends an unauthenticated GET to path on the collection endpoint
+// and returns the response whatever its status.
+//
+// It is for the few routes that need no credential, such as the agent sign-in
+// configuration: no X-MDM-* header and no Authorization header is set. The
+// https rule still applies, so an http collection URL is refused before any
+// request is made.
+func (c *Client) FetchPublic(path string) (*http.Response, error) {
+	endpoint, err := c.endpoint(path)
+	if err != nil {
+		return nil, err
+	}
+	req, err := c.newRequest(context.Background(), http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.doer.Do(req)
+	if err != nil {
+		c.log(logging.LevelWarn, "request failed",
+			logging.F("method", http.MethodGet),
+			logging.F("path", endpoint.Path),
+			logging.F("error", err.Error()),
+		)
+		return nil, err
+	}
+	c.log(logging.LevelDebug, "request sent",
+		logging.F("method", http.MethodGet),
+		logging.F("path", endpoint.Path),
+		logging.F("status", resp.StatusCode),
+	)
 	return resp, nil
 }
 
