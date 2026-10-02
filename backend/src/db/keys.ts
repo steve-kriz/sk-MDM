@@ -128,6 +128,17 @@ export function deviceListIndex(lastSeenIso: string): Gsi1Key {
   return { gsi1pk: 'DEVICE', gsi1sk: lastSeenIso };
 }
 
+/**
+ * Index attributes putting a group into the `gsi1` group list, sorted by name.
+ *
+ * The counterpart of `deviceListIndex`: the group records share one partition
+ * (`GROUP`, distinct from a group's own `GROUP#<groupId>` partition) so the
+ * admin group list is a query, never a scan.
+ */
+export function groupListIndex(name: string): Gsi1Key {
+  return { gsi1pk: 'GROUP', gsi1sk: name };
+}
+
 /** Index attributes listing a device under its group in `gsi1`. */
 export function groupIndex(groupId: string, deviceId: string): Gsi1Key {
   return { gsi1pk: `GROUP#${assertValidId(groupId)}`, gsi1sk: `DEVICE#${assertValidId(deviceId)}` };
