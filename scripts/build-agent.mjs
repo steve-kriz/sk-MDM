@@ -22,6 +22,12 @@ const PACKAGE = './cmd/mdmagent';
 
 const TARGETS = ['windows/amd64', 'windows/arm64', 'darwin/amd64', 'darwin/arm64'];
 
+/** The variable the build stamps the agent version into. */
+const VERSION_VAR = 'github.com/officehq/sk-mdm/agent/internal/version.Version';
+
+/** The version used when AGENT_VERSION says nothing. */
+const DEFAULT_VERSION = '0.0.0-dev';
+
 /** The platforms the agent ships for, as "<goos>/<goarch>" strings. */
 export function targets() {
   return [...TARGETS];
@@ -37,6 +43,37 @@ export function outputPath(target) {
   const [goos, goarch] = target.split('/');
   const suffix = goos === 'windows' ? '.exe' : '';
   return path.join(OUT_DIR, `mdmagent-${goos}-${goarch}${suffix}`);
+}
+
+/**
+ * The version the binaries are stamped with: AGENT_VERSION, or a development
+ * version when the release pipeline has not set one.
+ */
+export function version(env = process.env) {
+  return env.AGENT_VERSION ?? DEFAULT_VERSION;
+}
+
+/**
+ * The linker flags a release binary carries: no symbol table and no DWARF, so
+ * the binary is small, and the agent version stamped into the version package,
+ * so `mdmagent --version` reports the build rather than the default.
+ */
+export function ldflags(v) {
+  return `-s -w -X ${VERSION_VAR}=${v}`;
+}
+
+/** The argv `go build` is invoked with for a target. */
+export function buildArgs(target, v) {
+  return ['build', '-trimpath', '-ldflags', ldflags(v), '-o', outputPath(target), PACKAGE];
+}
+
+/**
+ * The environment a target is built in. CGO is off so every binary is static
+ * and runs on a machine with no toolchain and no matching libc.
+ */
+export function buildEnv(target) {
+  const [goos, goarch] = target.split('/');
+  return { GOOS: goos, GOARCH: goarch, CGO_ENABLED: '0' };
 }
 
 function parseArgs(argv) {
@@ -57,27 +94,14 @@ function parseArgs(argv) {
   return options;
 }
 
-function build(target, version) {
-  const [goos, goarch] = target.split('/');
+function build(target, v) {
   const output = outputPath(target);
   mkdirSync(path.dirname(output), { recursive: true });
-  const result = spawnSync(
-    process.env.GO_BIN ?? 'go',
-    [
-      'build',
-      '-trimpath',
-      '-ldflags',
-      `-s -w -X github.com/officehq/sk-mdm/agent/internal/version.Version=${version}`,
-      '-o',
-      output,
-      PACKAGE,
-    ],
-    {
-      cwd: AGENT_DIR,
-      stdio: 'inherit',
-      env: { ...process.env, GOOS: goos, GOARCH: goarch, CGO_ENABLED: '0' },
-    },
-  );
+  const result = spawnSync(process.env.GO_BIN ?? 'go', buildArgs(target, v), {
+    cwd: AGENT_DIR,
+    stdio: 'inherit',
+    env: { ...process.env, ...buildEnv(target) },
+  });
   if (result.error) {
     console.error(`failed to run the go toolchain: ${result.error.message}`);
     return false;
@@ -112,9 +136,9 @@ export function main(argv = process.argv.slice(2)) {
     return 0;
   }
 
-  const version = process.env.AGENT_VERSION ?? '0.0.0-dev';
+  const stamped = version();
   for (const target of selected) {
-    if (!build(target, version)) {
+    if (!build(target, stamped)) {
       return 1;
     }
   }

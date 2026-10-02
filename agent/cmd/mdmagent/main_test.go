@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/officehq/sk-mdm/agent/internal/config"
+	"github.com/officehq/sk-mdm/agent/internal/platform"
 	"github.com/officehq/sk-mdm/agent/internal/platform/fake"
 	"github.com/officehq/sk-mdm/agent/internal/state"
 )
@@ -426,5 +427,150 @@ func TestCLI_ShowPrintsAllFields(t *testing.T) {
 	}
 	if !strings.Contains(output, "warn") {
 		t.Errorf("Missing log level value")
+	}
+}
+
+// TestCLI_VersionPrintsVersion tests that --version prints the version
+func TestCLI_VersionPrintsVersion(t *testing.T) {
+	fsys := fake.NewFS()
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+
+	exitCode := run(fsys, "darwin", []string{"--version"}, stdout, stderr)
+
+	if exitCode != 0 {
+		t.Errorf("Expected exit code 0 for --version, got %d", exitCode)
+	}
+
+	output := stdout.String()
+	if strings.TrimSpace(output) == "" {
+		t.Error("Expected version output, got empty string")
+	}
+}
+
+// TestCLI_UninstallServiceNotInstalled tests uninstall-service when service doesn't exist
+func TestCLI_UninstallServiceNotInstalled(t *testing.T) {
+	fsys := fake.NewFS()
+	runner := fake.NewCommandRunner()
+	// Simulate service doesn't exist (exit code 1060)
+	runner.Results["sc.exe query OfficeHQMDMAgent"] = platform.CommandResult{ExitCode: 1060}
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+
+	// Override the newRunner function for this test
+	originalNewRunner := newRunner
+	defer func() { newRunner = originalNewRunner }()
+	newRunner = func() platform.CommandRunner { return runner }
+
+	exitCode := run(fsys, "windows", []string{"uninstall-service"}, stdout, stderr)
+
+	if exitCode != 0 {
+		t.Errorf("Expected exit code 0 when service not installed, got %d", exitCode)
+	}
+
+	if !strings.Contains(stdout.String(), "service not installed") {
+		t.Errorf("Expected 'service not installed' in output, got: %s", stdout.String())
+	}
+}
+
+// TestCLI_InstallServiceOnWindows tests install-service on Windows
+func TestCLI_InstallServiceOnWindows(t *testing.T) {
+	fsys := fake.NewFS()
+	runner := fake.NewCommandRunner()
+	runner.Results["sc.exe create OfficeHQMDMAgent binPath= \"C:\\Program Files\\mdmagent.exe\" run start= auto DisplayName= OfficeHQ MDM Agent"] = platform.CommandResult{ExitCode: 0}
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+
+	// Override the newRunner function for this test
+	originalNewRunner := newRunner
+	defer func() { newRunner = originalNewRunner }()
+	newRunner = func() platform.CommandRunner { return runner }
+
+	// Override executablePath to return a known binary path
+	originalExePath := executablePath
+	defer func() { executablePath = originalExePath }()
+	executablePath = func() (string, error) {
+		return "C:\\Program Files\\mdmagent.exe", nil
+	}
+
+	exitCode := run(fsys, "windows", []string{"install-service"}, stdout, stderr)
+
+	if exitCode != 0 {
+		t.Errorf("Expected exit code 0 for install-service, got %d. stderr: %s", exitCode, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "service installed") {
+		t.Errorf("Expected 'service installed' in output, got: %s", stdout.String())
+	}
+}
+
+// TestCLI_InstallServiceOnDarwin tests install-service on macOS
+func TestCLI_InstallServiceOnDarwin(t *testing.T) {
+	fsys := fake.NewFS()
+	runner := fake.NewCommandRunner()
+	runner.Results["launchctl bootstrap system /Library/LaunchDaemons/au.com.officehq.mdmagent.plist"] = platform.CommandResult{ExitCode: 0}
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+
+	// Override the newRunner function for this test
+	originalNewRunner := newRunner
+	defer func() { newRunner = originalNewRunner }()
+	newRunner = func() platform.CommandRunner { return runner }
+
+	// Override executablePath to return a known binary path
+	originalExePath := executablePath
+	defer func() { executablePath = originalExePath }()
+	executablePath = func() (string, error) {
+		return "/usr/local/bin/mdmagent", nil
+	}
+
+	exitCode := run(fsys, "darwin", []string{"install-service"}, stdout, stderr)
+
+	if exitCode != 0 {
+		t.Errorf("Expected exit code 0 for install-service, got %d. stderr: %s", exitCode, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "service installed") {
+		t.Errorf("Expected 'service installed' in output, got: %s", stdout.String())
+	}
+
+	// Verify plist was written
+	if !fsys.Exists("/Library/LaunchDaemons/au.com.officehq.mdmagent.plist") {
+		t.Error("plist file was not written")
+	}
+}
+
+// TestCLI_UninstallServiceOnDarwin tests uninstall-service on macOS
+func TestCLI_UninstallServiceOnDarwin(t *testing.T) {
+	fsys := fake.NewFS()
+	fsys.Seed("/Library/LaunchDaemons/au.com.officehq.mdmagent.plist", []byte("<plist></plist>"))
+
+	runner := fake.NewCommandRunner()
+	runner.Results["launchctl bootout system/au.com.officehq.mdmagent"] = platform.CommandResult{ExitCode: 0}
+
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+
+	// Override the newRunner function for this test
+	originalNewRunner := newRunner
+	defer func() { newRunner = originalNewRunner }()
+	newRunner = func() platform.CommandRunner { return runner }
+
+	exitCode := run(fsys, "darwin", []string{"uninstall-service"}, stdout, stderr)
+
+	if exitCode != 0 {
+		t.Errorf("Expected exit code 0 for uninstall-service, got %d. stderr: %s", exitCode, stderr.String())
+	}
+
+	if !strings.Contains(stdout.String(), "service removed") {
+		t.Errorf("Expected 'service removed' in output, got: %s", stdout.String())
+	}
+
+	// Verify plist was removed
+	if fsys.Exists("/Library/LaunchDaemons/au.com.officehq.mdmagent.plist") {
+		t.Error("plist file was not removed")
 	}
 }
