@@ -27,11 +27,16 @@
  * The mismatch is settled before the body is validated, so a request about
  * another device is refused as such whatever its payload looks like.
  *
- * Two things this route deliberately does not do. It stores nothing from
- * `policyCompliance` -- that field is accepted so an agent reporting it is not
- * refused, and is ingested by the policy-compliance ticket. And it returns no
- * policy information: resolving a device's policies belongs to
- * `GET /api/v1/devices/{deviceId}/policies`.
+ * `policyCompliance` is ingested here when the body carries it: one result item
+ * per entry naming a policy actually assigned to this device, after which the
+ * profile's `complianceState` is recomputed from everything stored (see
+ * `src/policies/resolve.ts`). An entry naming a policy the device does not hold
+ * is dropped, so a stale or mistaken agent can never move a device's state over
+ * a policy that was never its business. The field is still optional: a check-in
+ * without it stores no result and leaves `complianceState` exactly as it was.
+ *
+ * What this route does not do is return policy information: resolving a
+ * device's policies belongs to `GET /api/v1/devices/{deviceId}/policies`.
  *
  * Time units: `now()` yields integer epoch *seconds*, the unit
  * `verifyDeviceRequest` signs with (a `Date` or an ISO-8601 string is accepted
@@ -41,10 +46,23 @@
 import { isoUtc } from '../audit.js';
 import { DEFAULT_CHECKIN_INTERVAL_SECONDS } from '../config/intervals.js';
 import type { CheckInResponse } from '../contract/types.js';
-import { deviceCommand, deviceInventory, deviceListIndex, devicePosture, deviceProfile, type TableKey } from '../db/keys.js';
+import {
+  deviceCommand,
+  deviceCompliance,
+  deviceInventory,
+  deviceListIndex,
+  devicePosture,
+  deviceProfile,
+  type TableKey,
+} from '../db/keys.js';
 import type { Item, QueryPage, QueryRequest, RequestFields, WriteOutcome } from '../db/table.js';
 import { verifyDeviceRequest, type DeviceAuthResult, type EpochSecondsClock } from '../http/deviceAuth.js';
 import type { RouteHandler, RouteRequest, RouteResult, Router, RouterRequest } from '../http/router.js';
+import {
+  computeComplianceState,
+  readAssignedPolicyIds,
+  readComplianceResults,
+} from '../policies/resolve.js';
 
 /** Path this route is registered on. */
 export const CHECKIN_PATH = '/api/v1/devices/{deviceId}/checkin';
@@ -197,8 +215,10 @@ function softwareFields(inventory: Record<string, unknown>): string[] {
 /**
  * Name every field of the body that is missing or wrong, in report order.
  *
- * `policyCompliance` is not inspected: it is accepted whatever it holds and
- * nothing derived from it is ever stored.
+ * `policyCompliance` is not inspected: a check-in is never refused over what it
+ * reported about its policies. Whatever it holds is filtered when it is
+ * ingested, so a malformed entry is dropped rather than rejecting the heartbeat
+ * the rest of the body carries.
  */
 function offendingFields(body: Record<string, unknown> | undefined): string[] {
   if (body === undefined) {
@@ -366,6 +386,72 @@ async function countPendingCommands(table: CheckInTable, deviceId: string): Prom
 }
 
 /**
+ * Store what the agent reported about its policies, then settle the device's
+ * compliance state.
+ *
+ * Only policies the device actually holds are stored: the assigned set is read
+ * first and an entry outside it is dropped silently, so an agent reporting on a
+ * policy that was unassigned between its last bundle and this check-in neither
+ * writes an orphan item nor moves the device's state.
+ *
+ * The state is recomputed from everything stored rather than from this report
+ * alone, so a check-in that mentions one of three policies cannot look like a
+ * clean bill of health. A check-in carrying no `policyCompliance` array at all
+ * leaves every compliance item and the stored state untouched.
+ */
+async function recordPolicyCompliance(
+  table: CheckInTable,
+  deviceId: string,
+  reported: unknown,
+  at: Date,
+): Promise<void> {
+  if (!Array.isArray(reported)) {
+    return;
+  }
+
+  const assignedPolicyIds = await readAssignedPolicyIds(table, deviceId);
+  const assigned = new Set(assignedPolicyIds);
+  const reportedAt = isoUtc(at);
+
+  for (const entry of reported) {
+    if (!isObject(entry)) {
+      continue;
+    }
+    const policyId = typeof entry.policyId === 'string' ? entry.policyId : '';
+    if (!assigned.has(policyId)) {
+      continue;
+    }
+    let key: TableKey;
+    try {
+      key = deviceCompliance(deviceId, policyId);
+    } catch {
+      continue;
+    }
+    await table.put({
+      ...key,
+      deviceId,
+      policyId,
+      version: typeof entry.version === 'number' ? entry.version : 0,
+      // Anything that is not an explicit `true` is a device we cannot vouch for.
+      compliant: entry.compliant === true,
+      violations: Array.isArray(entry.violations)
+        ? entry.violations.filter((violation): violation is string => typeof violation === 'string')
+        : [],
+      reportedAt,
+    });
+  }
+
+  const complianceState = computeComplianceState(
+    assignedPolicyIds,
+    await readComplianceResults(table, deviceId),
+  );
+  await table.update(deviceProfile(deviceId), {
+    UpdateExpression: 'SET complianceState = :complianceState',
+    ExpressionAttributeValues: { ':complianceState': complianceState },
+  });
+}
+
+/**
  * Build the check-in route handler.
  *
  * @param source the dependencies, or a function resolving them on first use
@@ -408,7 +494,8 @@ export function createCheckInHandler(source: CheckInDependencySource): RouteHand
     await deps.table.put(inventoryItem(deviceId, collectedAt, objectAt(posted, 'inventory')));
     await deps.table.put(postureItem(deviceId, collectedAt, objectAt(posted, 'posture')));
 
-    const lastSeenAt = isoUtc(toDate(clock()));
+    const at = toDate(clock());
+    const lastSeenAt = isoUtc(at);
     const { gsi1pk, gsi1sk } = deviceListIndex(lastSeenAt);
     await deps.table.update(deviceProfile(deviceId), {
       UpdateExpression: 'SET lastSeenAt = :lastSeenAt, gsi1pk = :gsi1pk, gsi1sk = :gsi1sk',
@@ -418,6 +505,9 @@ export function createCheckInHandler(source: CheckInDependencySource): RouteHand
         ':gsi1sk': gsi1sk,
       },
     });
+
+    // Whatever the agent evaluated against the bundle it last pulled.
+    await recordPolicyCompliance(deps.table, deviceId, posted.policyCompliance, at);
 
     const responseBody: CheckInResponse = {
       checkInIntervalSeconds: DEFAULT_CHECKIN_INTERVAL_SECONDS,
