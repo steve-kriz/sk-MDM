@@ -5,3 +5,4 @@ cdk.out/
 tasks/
 .worktrees/
 *.tmp
+.tools/
