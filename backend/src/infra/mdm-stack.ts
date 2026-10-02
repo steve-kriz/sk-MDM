@@ -10,13 +10,24 @@
  * authenticate with the enrollment token (enroll) or the device HMAC scheme
  * (every other device endpoint) in the application layer, so AWS IAM signing
  * at the edge would reject every legitimate agent request.
+ *
+ * When `domainName` is set, a CloudFront distribution serves that domain in
+ * front of the Function URL, with an out-of-band us-east-1 ACM certificate
+ * (`certificateArn`) and, when `hostedZoneId` is set, Route 53 A/AAAA alias
+ * records. The Function URL stays public so already-installed agents keep
+ * working.
  */
 import { fileURLToPath } from 'node:url';
 
 import { CfnOutput, Duration, RemovalPolicy, Stack, type StackProps } from 'aws-cdk-lib';
+import * as acm from 'aws-cdk-lib/aws-certificatemanager';
+import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
+import * as origins from 'aws-cdk-lib/aws-cloudfront-origins';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as route53 from 'aws-cdk-lib/aws-route53';
+import * as targets from 'aws-cdk-lib/aws-route53-targets';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import type { Construct } from 'constructs';
@@ -28,6 +39,44 @@ export interface MdmStackProps extends StackProps {
   readonly entraClientId: string;
   /** Object id of the Entra group whose members are admins. Optional. */
   readonly entraAdminGroupId?: string;
+  /** Public host name served through CloudFront, e.g. `mdm.officehq.cc`. Optional. */
+  readonly domainName?: string;
+  /** ARN of the ACM certificate (us-east-1) for `domainName`. Required with `domainName`. */
+  readonly certificateArn?: string;
+  /** Route 53 hosted zone for `domainName` minus its first label. Optional: no DNS records without it. */
+  readonly hostedZoneId?: string;
+}
+
+const DOMAIN_NAME_PATTERN = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/;
+const CERTIFICATE_ARN_PATTERN = /^arn:aws:acm:us-east-1:\d{12}:certificate\/[A-Za-z0-9-]+$/;
+
+interface DomainConfig {
+  readonly domainName: string;
+  readonly certificateArn: string;
+  readonly hostedZoneId: string | undefined;
+}
+
+/** Validate the custom-domain props; `undefined` when no domain is configured. */
+function domainConfig(props: MdmStackProps | undefined): DomainConfig | undefined {
+  const domainName = props?.domainName ?? '';
+  const certificateArn = props?.certificateArn ?? '';
+  const hostedZoneId = props?.hostedZoneId ?? '';
+  if (domainName === '') {
+    if (certificateArn !== '' || hostedZoneId !== '') {
+      throw new Error('domainName is required when certificateArn or hostedZoneId is set');
+    }
+    return undefined;
+  }
+  if (!DOMAIN_NAME_PATTERN.test(domainName)) {
+    throw new Error('domainName must be a lower-case host name such as mdm.officehq.cc');
+  }
+  if (certificateArn === '') {
+    throw new Error('certificateArn is required when domainName is set');
+  }
+  if (!CERTIFICATE_ARN_PATTERN.test(certificateArn)) {
+    throw new Error('certificateArn must be an ACM certificate in us-east-1');
+  }
+  return { domainName, certificateArn, hostedZoneId: hostedZoneId === '' ? undefined : hostedZoneId };
 }
 
 /**
@@ -57,6 +106,8 @@ export class MdmStack extends Stack {
   public readonly functionUrl: lambda.FunctionUrl;
   /** The private bucket the agent installers are published to. */
   public readonly installerBucket: s3.Bucket;
+  /** The CloudFront distribution serving `domainName`, when one is configured. */
+  public readonly distribution?: cloudfront.Distribution;
 
   constructor(scope: Construct, id: string, props?: MdmStackProps) {
     super(scope, id, props);
@@ -67,6 +118,7 @@ export class MdmStack extends Stack {
     // Optional: CDK drops `undefined` from the environment map, which would
     // leave the Lambda reading `undefined`, so fall back to the empty string.
     const entraAdminGroupId = props?.entraAdminGroupId ?? '';
+    const domain = domainConfig(props);
 
     this.table = new dynamodb.Table(this, 'Table', {
       partitionKey: { name: 'pk', type: dynamodb.AttributeType.STRING },
@@ -116,6 +168,11 @@ export class MdmStack extends Stack {
         ENTRA_ADMIN_GROUP_ID: entraAdminGroupId,
         PEPPER_SECRET_ARN: this.pepperSecret.secretArn,
         INSTALLER_BUCKET: this.installerBucket.bucketName,
+        // Literals, not distribution tokens: a token would make the Lambda
+        // depend on the distribution, which depends on the Function URL.
+        ...(domain
+          ? { PUBLIC_HOST: domain.domainName, COLLECTION_URL: `https://${domain.domainName}/` }
+          : {}),
       },
     });
 
@@ -153,8 +210,48 @@ export class MdmStack extends Stack {
       authType: lambda.FunctionUrlAuthType.NONE,
     });
 
+    if (domain) {
+      // No OAC (`withOriginAccessControl`): it needs IAM-signed origin requests,
+      // which would break HMAC agents. The Function URL rejects a forwarded
+      // viewer Host header, hence AllViewerExceptHostHeader; the Lambda learns
+      // its public host from PUBLIC_HOST instead.
+      this.distribution = new cloudfront.Distribution(this, 'Distribution', {
+        defaultBehavior: {
+          origin: new origins.FunctionUrlOrigin(this.functionUrl),
+          viewerProtocolPolicy: cloudfront.ViewerProtocolPolicy.REDIRECT_TO_HTTPS,
+          allowedMethods: cloudfront.AllowedMethods.ALLOW_ALL,
+          cachePolicy: cloudfront.CachePolicy.CACHING_DISABLED,
+          originRequestPolicy: cloudfront.OriginRequestPolicy.ALL_VIEWER_EXCEPT_HOST_HEADER,
+        },
+        domainNames: [domain.domainName],
+        certificate: acm.Certificate.fromCertificateArn(this, 'Certificate', domain.certificateArn),
+        minimumProtocolVersion: cloudfront.SecurityPolicyProtocol.TLS_V1_2_2021,
+      });
+
+      if (domain.hostedZoneId !== undefined) {
+        // Attributes rather than `fromLookup`, so synth needs no account context.
+        const zone = route53.HostedZone.fromHostedZoneAttributes(this, 'HostedZone', {
+          hostedZoneId: domain.hostedZoneId,
+          zoneName: domain.domainName.split('.').slice(1).join('.'),
+        });
+        const target = route53.RecordTarget.fromAlias(new targets.CloudFrontTarget(this.distribution));
+        new route53.ARecord(this, 'AliasRecord', { zone, recordName: domain.domainName, target });
+        new route53.AaaaRecord(this, 'AliasRecordIpv6', { zone, recordName: domain.domainName, target });
+      }
+
+      new CfnOutput(this, 'DistributionDomainName', {
+        description: 'CloudFront domain to point the custom domain CNAME at when DNS is external',
+        value: this.distribution.distributionDomainName,
+      });
+    }
+
     new CfnOutput(this, 'CollectionUrl', {
       description: 'Collection URL the agent installers point at',
+      value: domain ? `https://${domain.domainName}/` : this.functionUrl.url,
+    });
+
+    new CfnOutput(this, 'FunctionUrl', {
+      description: 'Raw Lambda Function URL, kept for agents installed against it',
       value: this.functionUrl.url,
     });
 

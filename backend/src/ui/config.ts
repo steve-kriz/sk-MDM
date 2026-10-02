@@ -12,9 +12,11 @@
  * environment: a server-side value such as `ENTRA_ADMIN_GROUP_ID` or
  * `PEPPER_SECRET_ARN` cannot leak into a response it is never read into.
  *
- * `redirectUri` is derived from the request's own `Host` header rather than
- * configured, so the console works behind whatever hostname the Function URL
- * (or a fronting domain) answers on, with no redeploy.
+ * `redirectUri` is built from the public host (see `publicHost`): `PUBLIC_HOST`
+ * when the stack sets it for a custom domain fronted by CloudFront -- whose
+ * origin request drops the viewer `Host` header, so the Lambda would otherwise
+ * see its Function URL host -- and otherwise the request's own `Host` header,
+ * so the console works behind whatever hostname the Function URL answers on.
  */
 
 /** The environment this module reads: `process.env`, or a fake in a test. */
@@ -42,6 +44,15 @@ export function adminScope(clientId: string): string {
 /** A configured value, or `null` when it is absent or the empty string. */
 function configured(value: string | undefined): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * The host the console is served on: `env.PUBLIC_HOST` when it is a non-empty
+ * string, otherwise the request's `Host` header.
+ */
+export function publicHost(env: ConfigEnv, hostHeader: string): string {
+  const configuredHost = env.PUBLIC_HOST;
+  return typeof configuredHost === 'string' && configuredHost !== '' ? configuredHost : hostHeader;
 }
 
 /**

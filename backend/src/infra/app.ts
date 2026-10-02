@@ -8,10 +8,17 @@
  * non-empty environment variable wins, then CDK context
  * (`cdk deploy -c entraTenantId=...`), then the secret. `ENTRA_ADMIN_GROUP_ID`
  * is read from the environment, falling back to CDK context.
+ *
+ * The custom domain comes from `resolveDomainSettings`: `MDM_DOMAIN_NAME` /
+ * `MDM_CERTIFICATE_ARN` / `MDM_HOSTED_ZONE_ID`, then CDK context `domainName` /
+ * `certificateArn` / `hostedZoneId`. `domainName` defaults to `mdm.officehq.cc`,
+ * so every synth or deploy must supply the us-east-1 ACM certificate ARN
+ * (`MDM_CERTIFICATE_ARN` or `-c certificateArn=...`), or synth throws.
  */
 import { App } from 'aws-cdk-lib';
 
 import { createSecretsManagerClient, loadDeploySecrets } from './deploy-secrets.js';
+import { resolveDomainSettings } from './domain-settings.js';
 import { resolveEntraSettings } from './entra-settings.js';
 import { MdmStack } from './mdm-stack.js';
 
@@ -41,6 +48,7 @@ new MdmStack(app, 'MdmStack', {
   entraTenantId,
   entraClientId,
   entraAdminGroupId: setting('ENTRA_ADMIN_GROUP_ID', 'entraAdminGroupId'),
+  ...resolveDomainSettings({ env: process.env, context: (k) => app.node.tryGetContext(k) }),
 });
 
 app.synth();

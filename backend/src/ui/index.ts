@@ -43,7 +43,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RouteRequest, RouteResult, Router } from '../http/router.js';
-import { adminClientConfig } from './config.js';
+import { adminClientConfig, publicHost } from './config.js';
 
 /** Path of the public landing page. */
 export const INDEX_PATH = '/';
@@ -178,11 +178,11 @@ export function handleAdmin(): RouteResult {
 /**
  * `GET /admin/config.json` -- the public values the browser needs to sign in.
  *
- * `redirectUri` follows the hostname the request arrived on, so the console
- * works behind any domain that reaches this Lambda.
+ * `redirectUri` uses `PUBLIC_HOST` when it is set (the custom domain behind
+ * CloudFront), and otherwise the hostname the request arrived on.
  */
 export function handleConfig(request: RouteRequest): RouteResult {
-  const host = request.headers?.host ?? '';
+  const host = publicHost(process.env, request.headers?.host ?? '');
   const config = adminClientConfig(process.env, host);
   if (config === null) {
     return { statusCode: 500, body: { error: 'not_configured' } };
