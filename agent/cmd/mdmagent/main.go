@@ -8,6 +8,8 @@
 //	mdmagent uninstall-service [-binary <path>]
 //	mdmagent config set-url [-config <path>] <https url>
 //	mdmagent config show [-config <path>] [-state <path>]
+//	mdmagent login [-config <path>]
+//	mdmagent logout
 //
 // `run` is the agent itself, and is the verb both service managers are pointed
 // at: the Windows service and the macOS LaunchDaemon start this binary with it.
@@ -57,6 +59,10 @@ func run(fsys platform.FileSystem, goos string, args []string, stdout, stderr io
 			return runAgent(fsys, goos, args[1:], stdout, stderr)
 		case "install-service":
 			return runInstallService(fsys, goos, args[1:], stdout, stderr)
+		case "login":
+			return runLogin(fsys, goos, args[1:], stdout, stderr)
+		case "logout":
+			return runLogout(fsys, goos, args[1:], stdout, stderr)
 		case "uninstall-service":
 			return runUninstallService(fsys, goos, args[1:], stdout, stderr)
 		}

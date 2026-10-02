@@ -16,6 +16,7 @@
  */
 import { S3Client } from '@aws-sdk/client-s3';
 import { createTokenVerifier } from './auth/entra.js';
+import { createUserTokenVerifier } from './auth/userToken.js';
 import { createSdkDocumentClientAdapter, type SdkDocumentClient } from './aws/documentClient.js';
 import { createJwksFetcher, type FetchLike } from './aws/jwks.js';
 import { createSecretsClientAdapter, type SdkSecretsClient } from './aws/secrets.js';
@@ -28,6 +29,7 @@ import {
   configureDownloadRoute,
   configureEnrollRoute,
   configurePolicyBundleRoute,
+  configureUserSessionRoute,
   setCommandRouteDeps,
 } from './index.js';
 import { createS3InstallerStore } from './storage/installers.js';
@@ -101,13 +103,16 @@ export async function bootstrap({
   const getPepper = createPepperProvider({ secretsClient, secretArn });
   const pepper = await getPepper();
 
+  const jwksFetcher = createJwksFetcher(tenantId, fetchImpl as FetchLike);
   const verifier = createTokenVerifier({
     tenantId,
     clientId,
-    jwksFetcher: createJwksFetcher(tenantId, fetchImpl as FetchLike),
+    jwksFetcher,
     now: epochSeconds,
     adminGroupId: env.ENTRA_ADMIN_GROUP_ID ?? '',
   });
+  // TASK-031: the agent user token verifier shares the tenant, client and JWKS fetcher.
+  const userVerifier = createUserTokenVerifier({ tenantId, clientId, jwksFetcher, now: epochSeconds });
 
   configureEnrollRoute({ table, pepper });
   configureCheckInRoute({ table, pepper });
@@ -131,6 +136,7 @@ export async function bootstrap({
     bucket: installerBucket,
     installers: createS3InstallerStore({ bucket: installerBucket, client: createS3Client() }),
   });
+  configureUserSessionRoute({ table, pepper, now: epochSeconds, userVerifier });
 
   return { table, verifier };
 }
