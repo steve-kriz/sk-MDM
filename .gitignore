@@ -17,3 +17,6 @@ tasks/
 .worktrees/
 *.tmp
 .tools/
+.orchestrate/rework*/
+.orchestrate/*.log
+.orchestrate/*.txt

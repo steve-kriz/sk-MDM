@@ -89,6 +89,26 @@ if (cmd === 'list') {
     const r = ready(t.body);
     console.log(get(t, 'id'), r.ready ? 'READY' : 'NOT READY', r.gaps.join('; '));
   }
+} else if (cmd === 'body') {
+  // body <ID> <file> [key=value ...]: replace body up to "## Additional Context" (preserved verbatim)
+  const t = byId(a[0]);
+  let nb = fs.readFileSync(a[1], 'utf8').replace(/\r\n/g, '\n').trim();
+  const dm = nb.match(/^depends-on:\s*(.+)\n/);
+  if (dm) { setk(t, 'depends-on', dm[1].trim()); nb = nb.slice(dm[0].length).trim(); }
+  const idx = t.body.indexOf('## Additional Context');
+  const ac = idx >= 0 ? t.body.slice(idx) : '## Additional Context\n\n';
+  t.body = '\n' + nb + '\n\n' + ac;
+  for (let i = 2; i < a.length; i++) {
+    if (a[i] === '--activity') {
+      const cur = get(t, 'activities'); const arr = cur ? JSON.parse(cur) : [];
+      arr.push(JSON.parse(a[++i])); setk(t, 'activities', JSON.stringify(arr)); continue;
+    }
+    const j = a[i].indexOf('='); if (j < 1) throw new Error('bad arg ' + a[i]);
+    setk(t, a[i].slice(0, j), a[i].slice(j + 1));
+  }
+  setk(t, 'updated', now());
+  write(t);
+  console.log(a[0], 'body replaced ->', get(t, 'status'));
 } else if (cmd === 'set') {
   const t = byId(a[0]);
   let act = null;
