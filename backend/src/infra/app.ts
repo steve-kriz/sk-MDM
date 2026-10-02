@@ -49,6 +49,9 @@ new MdmStack(app, 'MdmStack', {
   entraClientId,
   entraAdminGroupId: setting('ENTRA_ADMIN_GROUP_ID', 'entraAdminGroupId'),
   ...resolveDomainSettings({ env: process.env, context: (k) => app.node.tryGetContext(k) }),
+  // Optional: the stack defaults to `prod/sk-mdm` / `ENTRA_CLIENT_SECRET`.
+  graphSecretName: setting('GRAPH_SECRET_NAME', 'graphSecretName'),
+  graphSecretKey: setting('GRAPH_SECRET_KEY', 'graphSecretKey'),
 });
 
 app.synth();
