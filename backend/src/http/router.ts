@@ -23,11 +23,20 @@ export interface RouteRequest extends RouterRequest {
   params: Record<string, string>;
 }
 
-/** What a route handler returns. `body` is serialised to JSON by the router. */
+/**
+ * What a route handler returns.
+ *
+ * `body` is serialised to JSON by the router and answered as
+ * `application/json`. A route that serves something else -- HTML, CSS, a
+ * script -- returns `rawBody` instead: that string is passed through
+ * untouched, and the response carries exactly the headers the route named,
+ * with no JSON content-type merged in. `rawBody` wins when both are present.
+ */
 export interface RouteResult {
   statusCode: number;
   headers?: Record<string, string>;
   body?: unknown;
+  rawBody?: string;
 }
 
 /** What `handle()` returns: an HTTP response with a JSON string body. */
@@ -88,6 +97,24 @@ function jsonResponse(statusCode: number, body: unknown, headers?: Record<string
   };
 }
 
+/**
+ * Turn what a handler returned into the response.
+ *
+ * A `rawBody` string is the whole body, byte for byte, and the handler's own
+ * headers are the whole header set; anything else is JSON, exactly as it has
+ * always been.
+ */
+function routeResponse(result: RouteResult): RouterResponse {
+  if (typeof result.rawBody === 'string') {
+    return {
+      statusCode: result.statusCode,
+      headers: { ...(result.headers ?? {}) },
+      body: result.rawBody,
+    };
+  }
+  return jsonResponse(result.statusCode, result.body, result.headers);
+}
+
 /** Collapse an unknown throwable into a single-line log message (never returned to the caller). */
 function describeError(error: unknown): string {
   const text = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
@@ -124,7 +151,7 @@ export function createRouter(): Router {
         }
         try {
           const result = await route.handler({ ...request, method, params });
-          return jsonResponse(result.statusCode, result.body, result.headers);
+          return routeResponse(result);
         } catch (error) {
           // Log once, with no stack text in the response body.
           console.error(`[router] ${method} ${request.path} failed: ${describeError(error)}`);
