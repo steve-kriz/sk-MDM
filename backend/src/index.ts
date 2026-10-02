@@ -4,6 +4,7 @@
  * This module owns the single application router; later tickets register their
  * routes on the exported `router` and need no change here.
  */
+import { registerAgentReleaseRoutes } from './admin/agentRelease.js';
 import { registerCommandDispatchRoutes } from './admin/commandDispatch.js';
 import { registerDeviceRoutes } from './admin/devices.js';
 import { registerEnrollmentTokenRoutes } from './admin/enrollmentTokens.js';
@@ -286,6 +287,21 @@ export type { AdminClientConfig, ConfigEnv } from './ui/config.js';
 export { collectionUrl } from './ui/settings.js';
 export type { SettingsEnv } from './ui/settings.js';
 // --- end TASK-013 ----------------------------------------------------------
+
+// --- TASK-022: agent self-update --------------------------------------------
+// Publishing a build is an admin write like any other: behind the same token
+// verifier, resolving the same injected dependencies. Nothing else is wired
+// here -- the build is advertised by the check-in route, which reads the
+// published record itself.
+registerAgentReleaseRoutes(router, resolveAdminDependencies);
+export {
+  AGENT_RELEASE_PATH,
+  AGENT_RELEASE_PUBLISHED_ACTION,
+  handleAgentReleasePublish,
+  offendingReleaseFields,
+  registerAgentReleaseRoutes,
+} from './admin/agentRelease.js';
+// --- end TASK-022 ----------------------------------------------------------
 
 function parseQuery(rawQueryString: string | undefined): Record<string, string> {
   const query: Record<string, string> = {};

@@ -26,7 +26,7 @@ const { DEFAULT_CHECKIN_INTERVAL_SECONDS } = await import(
   `file://${join(__dirname, '../../dist/config/intervals.js')}`
 );
 
-const { deviceProfile, deviceInventory, devicePosture, deviceCommand } = await import(
+const { agentRelease, deviceProfile, deviceInventory, devicePosture, deviceCommand } = await import(
   `file://${join(__dirname, '../../dist/db/keys.js')}`
 );
 
@@ -1006,7 +1006,7 @@ test('Unit: Missing posture object fails validation', async (t) => {
   assert.ok(result.body.fields.includes('posture'));
 });
 
-test('Unit: CheckInResponse has exactly two keys', async (t) => {
+test('Unit: CheckInResponse has exactly two keys when no release is advertised', async (t) => {
   const table = new FakeTable();
   const handler = createCheckInHandler({
     table,
@@ -1021,6 +1021,42 @@ test('Unit: CheckInResponse has exactly two keys', async (t) => {
   assert.strictEqual(result.statusCode, 200);
   const bodyKeys = Object.keys(result.body).sort();
   assert.deepStrictEqual(bodyKeys, ['checkInIntervalSeconds', 'pendingCommandCount']);
+});
+
+test('Unit: CheckInResponse carries agentRelease as its only extra key', async (t) => {
+  const table = new FakeTable();
+  table.seedItem({
+    ...deviceProfile('test-device-id'),
+    deviceId: 'test-device-id',
+    platform: 'windows',
+    agentVersion: '1.2.0',
+  });
+  table.seedItem({
+    ...agentRelease('windows-amd64'),
+    platform: 'windows-amd64',
+    version: '1.3.0',
+    url: 'https://releases.example.com/mdmagent/1.3.0/windows-amd64/mdmagent.exe',
+    sha256: 'a'.repeat(64),
+    publishedAt: '2026-10-02T12:00:00Z',
+  });
+
+  const handler = createCheckInHandler({
+    table,
+    pepper: randomHex(32),
+    now: () => new Date('2026-10-02T12:00:00Z'),
+    verifyDevice: createFakeVerifier('test-device-id', true),
+  });
+
+  const result = await handler(createValidCheckInRequest());
+
+  assert.strictEqual(result.statusCode, 200);
+  const bodyKeys = Object.keys(result.body).sort();
+  assert.deepStrictEqual(bodyKeys, ['agentRelease', 'checkInIntervalSeconds', 'pendingCommandCount']);
+  assert.deepStrictEqual(result.body.agentRelease, {
+    version: '1.3.0',
+    url: 'https://releases.example.com/mdmagent/1.3.0/windows-amd64/mdmagent.exe',
+    sha256: 'a'.repeat(64),
+  });
 });
 
 test('Unit: Authentication failure prevents storage', async (t) => {

@@ -493,6 +493,12 @@ components:
           $ref: '#/components/schemas/Inventory'
         posture:
           $ref: '#/components/schemas/Posture'
+        agentVersion:
+          type: string
+          description: >-
+            The agent build posting this check-in. Omitted by an agent old
+            enough not to report it, which is why the backend falls back to the
+            version recorded on the device profile.
         policyCompliance:
           type: array
           description: Omitted entirely when the agent has nothing to report.
@@ -527,6 +533,30 @@ components:
         pendingCommandCount:
           type: integer
           description: Commands waiting to be leased, so the agent can skip an empty poll.
+        agentRelease:
+          $ref: '#/components/schemas/AgentRelease'
+
+    AgentRelease:
+      type: object
+      additionalProperties: false
+      required: [version, url, sha256]
+      description: >-
+        The agent build the device is being moved to. Present only when a newer
+        build is published for the device's platform; the agent downloads `url`
+        and refuses bytes whose SHA-256 is not `sha256`.
+      properties:
+        version:
+          type: string
+          pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+          description: The published version.
+        url:
+          type: string
+          format: uri
+          description: Where the build is downloaded from. Always https.
+        sha256:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: SHA-256 of the build, lower-case hex.
 
     CommandLeaseResponse:
       type: object

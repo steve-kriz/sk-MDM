@@ -35,6 +35,15 @@
  * a policy that was never its business. The field is still optional: a check-in
  * without it stores no result and leaves `complianceState` exactly as it was.
  *
+ * The response is also where the fleet is moved onto a new agent build. When a
+ * release is published for the device's platform and architecture, and its
+ * version differs from the one the device is on, the answer carries an
+ * `agentRelease` the agent downloads, verifies and swaps itself for. The
+ * version the device is on is the optional top-level `agentVersion` the body
+ * reported, which is written onto the profile, falling back to what an earlier
+ * check-in recorded there. Nothing is read when the reported architecture is
+ * not one a build is published for.
+ *
  * What this route does not do is return policy information: resolving a
  * device's policies belongs to `GET /api/v1/devices/{deviceId}/policies`.
  *
@@ -45,8 +54,9 @@
  */
 import { isoUtc } from '../audit.js';
 import { DEFAULT_CHECKIN_INTERVAL_SECONDS } from '../config/intervals.js';
-import type { CheckInResponse } from '../contract/types.js';
+import type { AgentRelease, CheckInResponse } from '../contract/types.js';
 import {
+  agentRelease as agentReleaseKey,
   deviceCommand,
   deviceCompliance,
   deviceInventory,
@@ -75,6 +85,18 @@ export const MAX_SOFTWARE_ENTRIES = 2000;
 
 /** Status of a command still waiting to be leased; the only status counted. */
 export const PENDING_STATUS = 'pending';
+
+/**
+ * What the architectures a device may report are called in a release platform
+ * key. A device reporting anything else is offered no build at all: an update
+ * is only ever advertised when the published binary is known to run on it.
+ */
+export const ARCHITECTURE_ALIASES: Record<string, string> = {
+  amd64: 'amd64',
+  x86_64: 'amd64',
+  arm64: 'arm64',
+  aarch64: 'arm64',
+};
 
 /** `2026-10-02T07:15:00Z` -- the only timestamp shape the contract accepts. */
 const ISO_UTC_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/;
@@ -451,6 +473,73 @@ async function recordPolicyCompliance(
   });
 }
 
+/** The agent version the body reported, or `undefined` when it carried none. */
+function postedAgentVersion(posted: Record<string, unknown>): string | undefined {
+  const version = posted.agentVersion;
+  return typeof version === 'string' && version.length > 0 ? version : undefined;
+}
+
+/**
+ * The release platform architecture for what the inventory reported, or `null`
+ * when it is not an architecture a build is published for.
+ */
+function releaseArchitecture(posted: Record<string, unknown>): string | null {
+  const reported = objectAt(objectAt(posted, 'inventory'), 'os').architecture;
+  if (typeof reported !== 'string') {
+    return null;
+  }
+  return ARCHITECTURE_ALIASES[reported.trim().toLowerCase()] ?? null;
+}
+
+/**
+ * The build this device should move to, or `undefined` when it is already on
+ * the published one, when none is published for its platform, or when its
+ * architecture is not one a build is published for.
+ *
+ * The architecture is settled first, so a device nothing could be published for
+ * costs no read at all. The version the device is on is what it just reported,
+ * falling back to what the profile recorded at its last check-in: an agent old
+ * enough not to report its version is still moved forward.
+ */
+async function resolveAgentRelease(
+  table: CheckInTable,
+  deviceId: string,
+  posted: Record<string, unknown>,
+): Promise<AgentRelease | undefined> {
+  const architecture = releaseArchitecture(posted);
+  if (architecture === null) {
+    return undefined;
+  }
+
+  const profile = await table.get(deviceProfile(deviceId));
+  const platform = typeof profile?.platform === 'string' ? profile.platform : '';
+  let key: TableKey;
+  try {
+    key = agentReleaseKey(`${platform}-${architecture}`);
+  } catch {
+    // A platform no build is published for: nothing to advertise.
+    return undefined;
+  }
+
+  const release = await table.get(key);
+  const version = typeof release?.version === 'string' ? release.version : '';
+  if (version === '') {
+    return undefined;
+  }
+
+  const profileVersion = typeof profile?.agentVersion === 'string' ? profile.agentVersion : '';
+  const current = postedAgentVersion(posted) ?? profileVersion;
+  if (version === current) {
+    return undefined;
+  }
+
+  return {
+    version,
+    url: typeof release?.url === 'string' ? release.url : '',
+    sha256: typeof release?.sha256 === 'string' ? release.sha256 : '',
+  };
+}
+
 /**
  * Build the check-in route handler.
  *
@@ -497,22 +586,33 @@ export function createCheckInHandler(source: CheckInDependencySource): RouteHand
     const at = toDate(clock());
     const lastSeenAt = isoUtc(at);
     const { gsi1pk, gsi1sk } = deviceListIndex(lastSeenAt);
+    // The build the agent reported is recorded on the profile, so the next
+    // check-in still knows what it is running even if that one reports nothing.
+    const agentVersion = postedAgentVersion(posted);
     await deps.table.update(deviceProfile(deviceId), {
-      UpdateExpression: 'SET lastSeenAt = :lastSeenAt, gsi1pk = :gsi1pk, gsi1sk = :gsi1sk',
-      ExpressionAttributeValues: {
+      UpdateExpression:
+        'SET lastSeenAt = :lastSeenAt, gsi1pk = :gsi1pk, gsi1sk = :gsi1sk' +
+        (agentVersion === undefined ? '' : ', agentVersion = :agentVersion'),
+      ExpressionAttributeValues: compact({
         ':lastSeenAt': lastSeenAt,
         ':gsi1pk': gsi1pk,
         ':gsi1sk': gsi1sk,
-      },
+        ':agentVersion': agentVersion,
+      }),
     });
 
     // Whatever the agent evaluated against the bundle it last pulled.
     await recordPolicyCompliance(deps.table, deviceId, posted.policyCompliance, at);
 
+    const release = await resolveAgentRelease(deps.table, deviceId, posted);
+
     const responseBody: CheckInResponse = {
       checkInIntervalSeconds: DEFAULT_CHECKIN_INTERVAL_SECONDS,
       pendingCommandCount: await countPendingCommands(deps.table, deviceId),
     };
+    if (release !== undefined) {
+      responseBody.agentRelease = release;
+    }
     return { statusCode: 200, body: responseBody };
   };
 }
