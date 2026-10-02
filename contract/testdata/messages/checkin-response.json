@@ -1,0 +1,6 @@
+{
+  "deviceId": "dev-001",
+  "receivedAt": "2026-10-02T07:15:01Z",
+  "nextCheckInSeconds": 900,
+  "pendingCommandCount": 2
+}

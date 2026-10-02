@@ -1,0 +1,42 @@
+{
+  "deviceId": "dev-001",
+  "generatedAt": "2026-10-02T07:15:04Z",
+  "policies": [
+    {
+      "policyId": "pol-baseline",
+      "version": 4,
+      "settings": {
+        "firewall.enabled": true,
+        "diskEncryption.required": true,
+        "screenLock.timeoutSeconds": 900
+      }
+    },
+    {
+      "policyId": "pol-engineering",
+      "version": 2,
+      "settings": {
+        "screenLock.timeoutSeconds": 1800,
+        "usbStorage.blocked": false
+      }
+    }
+  ],
+  "effectiveSettings": {
+    "firewall.enabled": true,
+    "diskEncryption.required": true,
+    "screenLock.timeoutSeconds": 900,
+    "usbStorage.blocked": false
+  },
+  "conflicts": [
+    {
+      "key": "screenLock.timeoutSeconds",
+      "winningPolicyId": "pol-baseline",
+      "value": 900,
+      "losers": [
+        {
+          "policyId": "pol-engineering",
+          "value": 1800
+        }
+      ]
+    }
+  ]
+}

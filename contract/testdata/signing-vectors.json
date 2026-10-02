@@ -1,0 +1,58 @@
+[
+  {
+    "name": "get-commands-empty-body",
+    "description": "GET with a query and no body: the body line is the SHA-256 of zero bytes.",
+    "secretHex": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "method": "GET",
+    "path": "/api/v1/devices/dev-001/commands",
+    "query": "max=5",
+    "body": "",
+    "timestamp": 1760000000,
+    "nonce": "7b1f4c0a9e2d4f6b8c0a1d3e5f709213",
+    "deviceId": "dev-001",
+    "canonical": "GET\n/api/v1/devices/dev-001/commands\nmax=5\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n1760000000\n7b1f4c0a9e2d4f6b8c0a1d3e5f709213\ndev-001",
+    "signature": "v1=3eb3cb70e2a1bb8b857cd6f79c405f618bbe47f3a6b9c7a23872d0e549e3f526"
+  },
+  {
+    "name": "checkin-repeated-query-keys",
+    "description": "Repeated query keys sort by key then value, so a=0 precedes a=1.",
+    "secretHex": "a3f1c9d7e5b30916273849506172839405a6b7c8d9e0f1020304050607080910",
+    "method": "post",
+    "path": "/api/v1/devices/dev-001/checkin",
+    "query": "b=2&a=1&a=0",
+    "body": "{\"collectedAt\":\"2026-10-02T07:15:00Z\"}",
+    "timestamp": 1760000123,
+    "nonce": "c4d5e6f708192a3b4c5d6e7f80910a2b",
+    "deviceId": "dev-001",
+    "canonical": "POST\n/api/v1/devices/dev-001/checkin\na=0&a=1&b=2\n8cfca36497f3d49960bf855d32318614d45893c10f070d52f0dabfa057789510\n1760000123\nc4d5e6f708192a3b4c5d6e7f80910a2b\ndev-001",
+    "signature": "v1=5b80d42de54ebed99c30263b7b8ce66718d2507465189662d8194196db31fb7b"
+  },
+  {
+    "name": "command-result-unicode-body",
+    "description": "Non-ASCII body: both implementations hash the UTF-8 bytes, never an escaped form.",
+    "secretHex": "11223344556677889900aabbccddeeff11223344556677889900aabbccddeeff",
+    "method": "POST",
+    "path": "/api/v1/devices/dev-002/commands/cmd-77/result",
+    "query": "",
+    "body": "{\"commandId\":\"cmd-77\",\"output\":\"naïve-日本\"}",
+    "timestamp": 1760000456,
+    "nonce": "f0e1d2c3b4a5968778695a4b3c2d1e0f",
+    "deviceId": "dev-002",
+    "canonical": "POST\n/api/v1/devices/dev-002/commands/cmd-77/result\n\n0ae26c97b1806379aa4a3759d4689f4fec5f71d92aa5c1559d771e6b70a91cf9\n1760000456\nf0e1d2c3b4a5968778695a4b3c2d1e0f\ndev-002",
+    "signature": "v1=e5fc4be04fd393aef87048f65f55a6db99b92487d3733b191698e82ed40f4f34"
+  },
+  {
+    "name": "get-policies-no-query-no-body",
+    "description": "No query and no body: the canonical query line is empty.",
+    "secretHex": "deadbeefcafef00dfeedfacebadc0ffee1d0c0de5afe1dea0123456789abcdef",
+    "method": "GET",
+    "path": "/api/v1/devices/dev-003/policies",
+    "query": "",
+    "body": "",
+    "timestamp": 1760000789,
+    "nonce": "0123456789abcdef0123456789abcdef",
+    "deviceId": "dev-003",
+    "canonical": "GET\n/api/v1/devices/dev-003/policies\n\ne3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n1760000789\n0123456789abcdef0123456789abcdef\ndev-003",
+    "signature": "v1=46a408637dc1f339d380468da1e37b0ed0a19d004116fa302e71e0da7fad65d7"
+  }
+]
