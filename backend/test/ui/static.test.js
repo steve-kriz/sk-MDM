@@ -1,7 +1,7 @@
 /**
  * E2E cucumber-style tests for Admin UI static assets (TASK-013).
  *
- * Scenario: Index page is served
+ * Scenario: Console page is served at /admin
  * Scenario: Assets are served with their own media types
  * Scenario: Unknown asset is not served
  * Scenario: Security headers are present
@@ -11,12 +11,12 @@ import test from 'node:test';
 import assert from 'node:assert';
 import { handler } from '../../dist/index.js';
 
-test('Scenario: Index page is served - GET / returns 200 with text/html and <div id="app">', async (t) => {
+test('Scenario: Console page is served - GET /admin returns 200 with text/html and <div id="app">', async (t) => {
   const event = {
     requestContext: {
       http: {
         method: 'GET',
-        path: '/',
+        path: '/admin',
       },
     },
     headers: {},

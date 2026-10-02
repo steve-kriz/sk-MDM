@@ -33,6 +33,14 @@ import * as settingsView from '../views/settings.js';
 const STATE_KEY = 'skmdm.authState';
 const VERIFIER_KEY = 'skmdm.codeVerifier';
 
+/** The path the console is served at; the address bar returns here after sign-in. */
+export const ADMIN_PAGE_PATH = '/admin';
+
+/** Where the address bar points once the spent code is removed: the console, keeping the hash. */
+export function signedInLocation(hash) {
+  return `${ADMIN_PAGE_PATH}${hash}`;
+}
+
 /** The screens, in the order the navigation lists them. */
 export const SCREENS = [
   { hash: '#/devices', label: 'Devices' },
@@ -106,7 +114,7 @@ async function completeAuthorization(config) {
   sessionStorage.removeItem(STATE_KEY);
   sessionStorage.removeItem(VERIFIER_KEY);
   // The code is single-use and has been spent: take it out of the address bar.
-  window.history.replaceState(null, '', `/${window.location.hash}`);
+  window.history.replaceState(null, '', signedInLocation(window.location.hash));
   if (!result.ok) {
     state.error = result.error;
     return false;

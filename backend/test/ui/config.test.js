@@ -22,7 +22,7 @@ test('Unit - adminClientConfig builds valid config when env vars present', async
   assert.ok(config !== null, 'config should not be null');
   assert.strictEqual(config.tenantId, 't-1');
   assert.strictEqual(config.clientId, 'c-9');
-  assert.strictEqual(config.redirectUri, 'https://admin.example.com/');
+  assert.strictEqual(config.redirectUri, 'https://admin.example.com/admin');
   assert.strictEqual(config.scope, 'api://c-9/MDM.Admin');
 });
 
@@ -135,7 +135,7 @@ test('E2E - GET /admin/config.json redirectUri uses request host header', async 
   const response = await handler(event);
 
   const config = JSON.parse(response.body);
-  assert.strictEqual(config.redirectUri, 'https://custom.domain.com/');
+  assert.strictEqual(config.redirectUri, 'https://custom.domain.com/admin');
 });
 
 test('E2E - GET /admin/config.json scope is api://clientId/MDM.Admin', async (t) => {

@@ -178,3 +178,16 @@ tr.device {
 .copy-field {
   font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
 }
+
+.landing {
+  margin: 0 auto;
+  max-width: 48rem;
+  padding: 1.5rem;
+}
+
+.landing pre {
+  background: #fff;
+  border: 1px solid var(--line);
+  overflow-x: auto;
+  padding: 0.75rem;
+}
