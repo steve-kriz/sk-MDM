@@ -1,0 +1,7 @@
+node_modules/
+dist/
+cdk.out/
+.claude-logs/
+tasks/
+.worktrees/
+*.tmp
