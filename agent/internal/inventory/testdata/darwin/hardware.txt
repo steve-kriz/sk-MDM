@@ -1,0 +1,18 @@
+{
+  "SPHardwareDataType" : [
+    {
+      "_name" : "hardware_overview",
+      "activation_lock_status" : "activation_lock_disabled",
+      "boot_rom_version" : "10151.140.19",
+      "chip_type" : "Apple M2 Pro",
+      "machine_model" : "Mac14,10",
+      "machine_name" : "MacBook Pro",
+      "model_number" : "Z17G000NAX/A",
+      "number_processors" : "proc 12:8:4",
+      "os_loader_version" : "10151.140.19",
+      "physical_memory" : "16 GB",
+      "platform_UUID" : "8F2A4C10-6B3D-5E71-9A08-2D4F6C8B1E33",
+      "serial_number" : "C02XK1Y2MD6T"
+    }
+  ]
+}
