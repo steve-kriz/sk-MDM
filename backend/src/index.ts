@@ -5,6 +5,7 @@
  * routes on the exported `router` and need no change here.
  */
 import { createRouter, type Router, type RouterRequest, type RouterResponse } from './http/router.js';
+import { registerCheckInRoute, resolveCheckInDependencies } from './routes/checkin.js';
 import { registerCommandRoutes, type CommandRouteDeps } from './routes/commands.js';
 
 import { registerEnrollRoute, resolveEnrollDependencies } from './routes/enroll.js';
@@ -59,6 +60,23 @@ registerEnrollRoute(router, resolveEnrollDependencies);
 export { ENROLL_PATH, configureEnrollRoute, createEnrollHandler, registerEnrollRoute } from './routes/enroll.js';
 export type { EnrollDependencies, EnrollTable, PepperSource } from './routes/enroll.js';
 // --- end TASK-006 ----------------------------------------------------------
+
+// --- TASK-007: POST /api/v1/devices/{deviceId}/checkin ---------------------
+// The agent heartbeat. Authenticated inside the handler by `verifyDeviceRequest`,
+// so it needs no wiring here beyond its dependencies, which are resolved on each
+// request: start-up calls `configureCheckInRoute({ table, pepper })` before the
+// first request so no AWS client is constructed at import time.
+registerCheckInRoute(router, resolveCheckInDependencies);
+export {
+  CHECKIN_PATH,
+  MAX_BODY_BYTES,
+  MAX_SOFTWARE_ENTRIES,
+  configureCheckInRoute,
+  createCheckInHandler,
+  registerCheckInRoute,
+} from './routes/checkin.js';
+export type { CheckInDependencies, CheckInRouteResponse, CheckInTable } from './routes/checkin.js';
+// --- end TASK-007 ----------------------------------------------------------
 
 function parseQuery(rawQueryString: string | undefined): Record<string, string> {
   const query: Record<string, string> = {};
