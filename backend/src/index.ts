@@ -267,16 +267,19 @@ export type { ComplianceResult, ComplianceState, PolicyReadTable } from './polic
 // keep their own content-types while every API route stays JSON.
 registerUiRoutes(router);
 export {
+  ADMIN_PATH,
   ASSET_PATH,
   CONFIG_PATH,
   CONTENT_TYPES,
   INDEX_FILE,
   INDEX_PATH,
+  LANDING_FILE,
   PUBLIC_ASSET_PATH,
   PUBLIC_DIR,
   SECURITY_HEADERS,
   VIEWS_DIR,
   VIEW_ASSET_PATH,
+  handleAdmin,
   handleConfig,
   handleIndex,
   registerUiRoutes,

@@ -2,7 +2,7 @@
  * The public client configuration the admin console boots from.
  *
  *   GET /admin/config.json
- *   -> {"tenantId":"t-1","clientId":"c-9","redirectUri":"https://admin.example.com/","scope":"api://c-9/MDM.Admin"}
+ *   -> {"tenantId":"t-1","clientId":"c-9","redirectUri":"https://admin.example.com/admin","scope":"api://c-9/MDM.Admin"}
  *
  * Sign-in happens entirely in the browser: the SPA runs the authorization-code
  * flow with PKCE against Entra ID itself, so the Lambda never holds a session,
@@ -58,7 +58,7 @@ export function adminClientConfig(env: ConfigEnv, host: string): AdminClientConf
   return {
     tenantId,
     clientId,
-    redirectUri: `https://${host}/`,
+    redirectUri: `https://${host}/admin`,
     scope: adminScope(clientId),
   };
 }

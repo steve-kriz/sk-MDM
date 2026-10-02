@@ -1,14 +1,21 @@
 /**
- * The admin console, served by the same Lambda as the API.
+ * The admin console and the public landing page, served by the same Lambda as
+ * the API.
  *
- *   GET /                     -- the single page the console boots from
+ *   GET /                     -- the public agent download landing page
+ *   GET /admin                -- the single page the console boots from
  *   GET /assets/{file}        -- its stylesheet and browser modules
  *   GET /assets/views/{file}  -- the per-screen view modules
  *   GET /admin/config.json    -- the public client configuration
  *
  *   registerUiRoutes(router);
  *
- * Nothing here is behind the token verifier: the page, its scripts and the
+ * `/admin` and `/admin/` match the same route (the router drops empty
+ * segments), and exact segment-count matching keeps it apart from
+ * `/admin/config.json` and `/admin/api/v1/*`. Nothing here registers a
+ * `/downloads/*` route; the landing page only links to those paths.
+ *
+ * Nothing here is behind the token verifier: the pages, their scripts and the
  * client configuration are public by construction, and every call that reads
  * or writes fleet data is made by the browser against `/admin/api/v1/*`, which
  * is. There is no server-side session, no `/auth/*` route and no cookie; the
@@ -38,8 +45,11 @@ import { fileURLToPath } from 'node:url';
 import type { RouteRequest, RouteResult, Router } from '../http/router.js';
 import { adminClientConfig } from './config.js';
 
-/** Path of the single page. */
+/** Path of the public landing page. */
 export const INDEX_PATH = '/';
+
+/** Path of the single page the admin console boots from. */
+export const ADMIN_PATH = '/admin';
 
 /** Path pattern of a browser module or stylesheet. */
 export const ASSET_PATH = '/assets/{file}';
@@ -53,8 +63,11 @@ export const VIEW_ASSET_PATH = '/assets/views/{file}';
 /** Path of the public client configuration. */
 export const CONFIG_PATH = '/admin/config.json';
 
-/** The file `GET /` answers with. */
+/** The file `GET /admin` answers with: the console shell. */
 export const INDEX_FILE = 'index.html';
+
+/** The file `GET /` answers with: the public landing page. */
+export const LANDING_FILE = 'landing.html';
 
 /** Where the browser modules and the stylesheet live, next to this module. */
 export const PUBLIC_DIR = fileURLToPath(new URL('./public/', import.meta.url));
@@ -152,8 +165,13 @@ export function serveAsset(directory: string, name: string): RouteResult {
   };
 }
 
-/** `GET /` -- the page the console boots from. */
+/** `GET /` -- the public landing page: agent downloads and install instructions. */
 export function handleIndex(): RouteResult {
+  return serveAsset(PUBLIC_DIR, LANDING_FILE);
+}
+
+/** `GET /admin` -- the page the console boots from. */
+export function handleAdmin(): RouteResult {
   return serveAsset(PUBLIC_DIR, INDEX_FILE);
 }
 
@@ -175,6 +193,7 @@ export function handleConfig(request: RouteRequest): RouteResult {
 /** Register the console's routes on a router. Returns the router, so calls chain. */
 export function registerUiRoutes(router: Router): Router {
   router.add('GET', INDEX_PATH, () => handleIndex());
+  router.add('GET', ADMIN_PATH, () => handleAdmin());
   router.add('GET', ASSET_PATH, (request) => serveAsset(PUBLIC_DIR, request.params.file ?? ''));
   router.add('GET', PUBLIC_ASSET_PATH, (request) => serveAsset(PUBLIC_DIR, request.params.file ?? ''));
   router.add('GET', VIEW_ASSET_PATH, (request) => serveAsset(VIEWS_DIR, request.params.file ?? ''));

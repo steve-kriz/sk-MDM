@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>SK-MDM agent download</title>
+    <link rel="stylesheet" href="/assets/public/styles.css" />
+  </head>
+  <body>
+    <header class="masthead">
+      <h1>SK-MDM</h1>
+    </header>
+    <main class="landing">
+      <h2>Install the SK-MDM agent</h2>
+      <p>
+        Download the installer for the device you are setting up, then follow the
+        instructions for its platform. You will need an enrollment token from your
+        administrator.
+      </p>
+
+      <section>
+        <h3>Collection URL</h3>
+        <p>Every agent reports to this collection URL:</p>
+        <p><code id="collection-url" class="copy-field"></code></p>
+      </section>
+
+      <section>
+        <h3>Windows</h3>
+        <ul class="downloads">
+          <li><a href="/downloads/windows-x64">Download for Windows x64 (.msi)</a></li>
+          <li><a href="/downloads/windows-arm64">Download for Windows ARM64 (.msi)</a></li>
+        </ul>
+        <p>
+          From an elevated command prompt, run the command below. Replace the
+          placeholders with the path to the downloaded .msi and your enrollment token.
+        </p>
+        <pre><code id="windows-install-command" class="copy-field"></code></pre>
+      </section>
+
+      <section>
+        <h3>macOS</h3>
+        <ul class="downloads">
+          <li><a href="/downloads/macos-amd64">Download for macOS Intel (.pkg)</a></li>
+          <li><a href="/downloads/macos-arm64">Download for macOS Apple silicon (.pkg)</a></li>
+        </ul>
+        <p>
+          The macOS package already carries the collection URL and enrollment token.
+          In Terminal, run the command below with the path to the downloaded .pkg.
+        </p>
+        <pre><code id="macos-install-command" class="copy-field">sudo installer -pkg &lt;downloaded .pkg&gt; -target /</code></pre>
+      </section>
+
+      <section>
+        <h3>Administrators</h3>
+        <p><a href="/admin">Open the admin console</a></p>
+      </section>
+    </main>
+    <script type="module" src="/assets/public/landing.js"></script>
+  </body>
+</html>
