@@ -198,13 +198,13 @@ test('E2E: Scenario: Role policy is scoped to the table and the one secret', asy
       `No statement should use Resource "*"`
     );
 
-    // Check that only DynamoDB and SecretsManager are mentioned
+    // Check that only DynamoDB, SecretsManager and S3 are mentioned
     const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
     for (const action of actions) {
       const service = action.split(':')[0];
       assert.ok(
-        ['dynamodb', 'secretsmanager'].includes(service),
-        `Only dynamodb and secretsmanager services allowed, found: ${service}`
+        ['dynamodb', 'secretsmanager', 's3'].includes(service),
+        `Only dynamodb, secretsmanager and s3 services allowed, found: ${service}`
       );
     }
   }

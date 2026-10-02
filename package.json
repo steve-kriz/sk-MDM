@@ -9,6 +9,7 @@
   "scripts": {
     "build": "npm --prefix backend run build",
     "build:agent": "node scripts/build-agent.mjs",
+    "publish:installers": "node scripts/publish-installers.mjs",
     "test": "npm --prefix backend run build && node --test \"backend/test/**/*.test.js\" \"installers/test/**/*.test.js\""
   },
   "engines": {
