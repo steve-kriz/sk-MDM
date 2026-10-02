@@ -30,11 +30,13 @@ export interface MdmStackProps extends StackProps {
 }
 
 /**
- * Directory handed to the Lambda as its code asset: the compiled backend
- * output, which is the parent of this module once built (`dist/infra` -> `dist`)
- * and therefore holds the `index.js` named by the `index.handler` handler.
+ * Directory handed to the Lambda as its code asset: the self-contained esbuild
+ * bundle written by `scripts/bundle-lambda.mjs` (`backend/dist-lambda`, two
+ * levels up from this module once built in `dist/infra`). It holds the
+ * `index.mjs` named by the `index.handler` handler, with the AWS SDK inside it,
+ * because the asset ships no `node_modules`.
  */
-const LAMBDA_CODE_PATH = fileURLToPath(new URL('..', import.meta.url));
+export const LAMBDA_CODE_PATH = fileURLToPath(new URL('../../dist-lambda/', import.meta.url));
 
 function required(value: string | undefined, name: string): string {
   if (value === undefined || value === '') {
