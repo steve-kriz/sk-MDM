@@ -86,6 +86,18 @@ export function groupMember(groupId: string, deviceId: string): TableKey {
   return { pk: `GROUP#${assertValidId(groupId)}`, sk: `MEMBER#${assertValidId(deviceId)}` };
 }
 
+/**
+ * `DEVICE#<deviceId>` / `COMPLIANCE#<policyId>` -- the last compliance result
+ * the device reported for one policy.
+ *
+ * One item per policy rather than one per check-in: a later report for the same
+ * policy overwrites the earlier one, so the device's partition never grows with
+ * its check-in history.
+ */
+export function deviceCompliance(deviceId: string, policyId: string): TableKey {
+  return { pk: `DEVICE#${assertValidId(deviceId)}`, sk: `COMPLIANCE#${assertValidId(policyId)}` };
+}
+
 /** `POLICY#<policyId>` / `PROFILE` -- the policy document. */
 export function policy(policyId: string): TableKey {
   return { pk: `POLICY#${assertValidId(policyId)}`, sk: 'PROFILE' };
@@ -142,4 +154,17 @@ export function groupListIndex(name: string): Gsi1Key {
 /** Index attributes listing a device under its group in `gsi1`. */
 export function groupIndex(groupId: string, deviceId: string): Gsi1Key {
   return { gsi1pk: `GROUP#${assertValidId(groupId)}`, gsi1sk: `DEVICE#${assertValidId(deviceId)}` };
+}
+
+/**
+ * Index attributes listing a policy under the group it is assigned to in `gsi1`.
+ *
+ * An assignment item is keyed by its policy (`policyAssignment`), so this is
+ * what lets the other direction -- "which policies does this group carry" --
+ * be a query rather than a scan. It shares the `GROUP#<groupId>` partition with
+ * `groupIndex`; the two are told apart by their sort key prefix, so a group's
+ * policies are read with `begins_with(gsi1sk, 'POLICY#')`.
+ */
+export function policyAssignmentIndex(groupId: string, policyId: string): Gsi1Key {
+  return { gsi1pk: `GROUP#${assertValidId(groupId)}`, gsi1sk: `POLICY#${assertValidId(policyId)}` };
 }

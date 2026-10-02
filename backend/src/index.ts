@@ -8,10 +8,12 @@ import { registerCommandDispatchRoutes } from './admin/commandDispatch.js';
 import { registerDeviceRoutes } from './admin/devices.js';
 import { registerEnrollmentTokenRoutes } from './admin/enrollmentTokens.js';
 import { registerGroupRoutes } from './admin/groups.js';
+import { registerPolicyRoutes } from './admin/policies.js';
 import { registerAuditRoutes, resolveAdminDependencies } from './admin/router.js';
 import { createRouter, type Router, type RouterRequest, type RouterResponse } from './http/router.js';
 import { registerCheckInRoute, resolveCheckInDependencies } from './routes/checkin.js';
 import { registerCommandRoutes, type CommandRouteDeps } from './routes/commands.js';
+import { registerPolicyBundleRoute, resolvePolicyBundleDependencies } from './routes/policies.js';
 
 import { registerEnrollRoute, resolveEnrollDependencies } from './routes/enroll.js';
 
@@ -196,6 +198,63 @@ export {
 } from './admin/router.js';
 export type { AdminRandomBytes, AdminWriteTable } from './admin/router.js';
 // --- end TASK-011 ----------------------------------------------------------
+
+// --- TASK-012: policies and compliance --------------------------------------
+// Two surfaces over one entity. The admin routes -- create, version, assign and
+// the per-policy compliance view -- register behind the same token verifier and
+// resolve the same injected dependencies as every other admin route.
+// `GET /api/v1/devices/{deviceId}/policies` is an agent route instead: it is
+// authenticated inside its handler by `verifyDeviceRequest` and resolves its own
+// dependencies on each request, so start-up calls
+// `configurePolicyBundleRoute({ table, pepper })` before the first request and
+// no AWS client is constructed at import time.
+registerPolicyRoutes(router, resolveAdminDependencies);
+registerPolicyBundleRoute(router, resolvePolicyBundleDependencies);
+export {
+  FIRST_POLICY_VERSION,
+  OS_UPDATE_MAX_AGE_DAYS,
+  POLICY_ASSIGNED_ACTION,
+  POLICY_ASSIGNMENT_PATH,
+  POLICY_COMPLIANCE_PATH,
+  POLICY_CREATED_ACTION,
+  POLICY_DETAIL_PATH,
+  POLICY_ID_PREFIX,
+  POLICY_PATH,
+  POLICY_SETTING_KEYS,
+  POLICY_UNASSIGNED_ACTION,
+  POLICY_UPDATED_ACTION,
+  SCREEN_LOCK_TIMEOUT_SECONDS,
+  handlePolicyAssign,
+  handlePolicyCompliance,
+  handlePolicyCreate,
+  handlePolicyUnassign,
+  handlePolicyUpdate,
+  offendingSettingsFields,
+  registerPolicyRoutes,
+} from './admin/policies.js';
+export {
+  POLICY_BUNDLE_PATH,
+  configurePolicyBundleRoute,
+  createPolicyBundleHandler,
+  registerPolicyBundleRoute,
+} from './routes/policies.js';
+export type { PolicyBundleDependencies, PolicyBundleTable } from './routes/policies.js';
+export { mergePolicySettings } from './policies/merge.js';
+export type { MergedPolicies, PolicyConflict, PolicyDocument } from './policies/merge.js';
+export {
+  COMPLIANT_STATE,
+  NONCOMPLIANT_STATE,
+  UNKNOWN_STATE,
+  computeComplianceState,
+  readAssignedPolicies,
+  readAssignedPolicyIds,
+  readComplianceResults,
+  readDeviceGroupIds,
+  readGroupPolicyIds,
+  readPolicyGroupIds,
+} from './policies/resolve.js';
+export type { ComplianceResult, ComplianceState, PolicyReadTable } from './policies/resolve.js';
+// --- end TASK-012 ----------------------------------------------------------
 
 function parseQuery(rawQueryString: string | undefined): Record<string, string> {
   const query: Record<string, string> = {};
