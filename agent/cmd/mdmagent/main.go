@@ -3,8 +3,14 @@
 // Usage:
 //
 //	mdmagent [-version]
+//	mdmagent run [-config <path>] [-state <path>]
+//	mdmagent install-service [-binary <path>]
+//	mdmagent uninstall-service [-binary <path>]
 //	mdmagent config set-url [-config <path>] <https url>
 //	mdmagent config show [-config <path>] [-state <path>]
+//
+// `run` is the agent itself, and is the verb both service managers are pointed
+// at: the Windows service and the macOS LaunchDaemon start this binary with it.
 //
 // Exit codes: 0 on success, 2 for a collection URL that is not https, and 1
 // for anything else that went wrong, including a usage mistake. The installer
@@ -43,8 +49,17 @@ func main() {
 // run is main's body with every dependency passed in, so the commands are
 // exercised in-process against a fake filesystem.
 func run(fsys platform.FileSystem, goos string, args []string, stdout, stderr io.Writer) int {
-	if len(args) > 0 && args[0] == "config" {
-		return runConfig(fsys, goos, args[1:], stdout, stderr)
+	if len(args) > 0 {
+		switch args[0] {
+		case "config":
+			return runConfig(fsys, goos, args[1:], stdout, stderr)
+		case "run":
+			return runAgent(fsys, goos, args[1:], stdout, stderr)
+		case "install-service":
+			return runInstallService(fsys, goos, args[1:], stdout, stderr)
+		case "uninstall-service":
+			return runUninstallService(fsys, goos, args[1:], stdout, stderr)
+		}
 	}
 
 	flags := flag.NewFlagSet("mdmagent", flag.ContinueOnError)
