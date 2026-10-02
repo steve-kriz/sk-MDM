@@ -16,6 +16,7 @@ import { registerCommandRoutes, type CommandRouteDeps } from './routes/commands.
 import { registerPolicyBundleRoute, resolvePolicyBundleDependencies } from './routes/policies.js';
 
 import { registerEnrollRoute, resolveEnrollDependencies } from './routes/enroll.js';
+import { registerUiRoutes } from './ui/index.js';
 
 /** The subset of the Lambda Function URL (payload format 2.0) event we use. */
 export interface FunctionUrlEvent {
@@ -256,6 +257,36 @@ export {
 export type { ComplianceResult, ComplianceState, PolicyReadTable } from './policies/resolve.js';
 // --- end TASK-012 ----------------------------------------------------------
 
+// --- TASK-013: the admin console --------------------------------------------
+// The single page, its browser modules and the public client configuration,
+// served by this same Lambda. Nothing here is behind the token verifier and
+// nothing here holds a session: the browser runs the OIDC authorization-code
+// flow with PKCE itself and calls `/admin/api/v1/*` with the resulting bearer
+// token. The static responses use the router's `rawBody` pass-through, so they
+// keep their own content-types while every API route stays JSON.
+registerUiRoutes(router);
+export {
+  ASSET_PATH,
+  CONFIG_PATH,
+  CONTENT_TYPES,
+  INDEX_FILE,
+  INDEX_PATH,
+  PUBLIC_ASSET_PATH,
+  PUBLIC_DIR,
+  SECURITY_HEADERS,
+  VIEWS_DIR,
+  VIEW_ASSET_PATH,
+  handleConfig,
+  handleIndex,
+  registerUiRoutes,
+  serveAsset,
+} from './ui/index.js';
+export { ADMIN_SCOPE_NAME, CONFIG_KEYS, adminClientConfig, adminScope } from './ui/config.js';
+export type { AdminClientConfig, ConfigEnv } from './ui/config.js';
+export { collectionUrl } from './ui/settings.js';
+export type { SettingsEnv } from './ui/settings.js';
+// --- end TASK-013 ----------------------------------------------------------
+
 function parseQuery(rawQueryString: string | undefined): Record<string, string> {
   const query: Record<string, string> = {};
   if (!rawQueryString) {
@@ -316,9 +347,20 @@ export async function handler(event: FunctionUrlEvent): Promise<FunctionUrlRespo
 
   return {
     statusCode: response.statusCode,
-    headers: { ...response.headers, 'content-type': 'application/json' },
+    headers: withDefaultContentType(response.headers),
     body: response.body,
   };
+}
+
+/**
+ * JSON is the default, never an override: a route that named its own
+ * content-type (the UI's HTML, CSS and script responses) keeps it, and every
+ * route that named none is answered as `application/json`, as all of them were
+ * before the UI existed.
+ */
+function withDefaultContentType(headers: Record<string, string>): Record<string, string> {
+  const named = Object.keys(headers).some((key) => key.toLowerCase() === 'content-type');
+  return named ? { ...headers } : { ...headers, 'content-type': 'application/json' };
 }
 
 export { createRouter } from './http/router.js';

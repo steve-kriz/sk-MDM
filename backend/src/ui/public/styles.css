@@ -1,0 +1,180 @@
+/*
+ * The console's whole stylesheet.
+ *
+ * One file, no framework and no web font: the content security policy the
+ * Lambda serves is `default-src 'self'`, so everything the page loads comes
+ * from this origin.
+ */
+
+:root {
+  --ink: #16202a;
+  --muted: #5c6b7a;
+  --line: #d7dee5;
+  --accent: #1f5f8b;
+  --bad: #a62828;
+  --page: #f6f8fa;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--ink);
+  font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+.masthead {
+  background: var(--ink);
+  color: #fff;
+  padding: 0.75rem 1.5rem;
+}
+
+.masthead h1 {
+  font-size: 1.1rem;
+  margin: 0;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+#app {
+  margin: 0 auto;
+  max-width: 68rem;
+  padding: 1.5rem;
+}
+
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  border-bottom: 1px solid var(--line);
+  margin-bottom: 1.5rem;
+  padding-bottom: 0.75rem;
+}
+
+nav a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+nav a.current {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+h2 {
+  font-size: 1.25rem;
+  margin: 0 0 1rem;
+}
+
+h3 {
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
+}
+
+.panel,
+.setting,
+.token-once,
+form {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin-bottom: 1rem;
+  padding: 1rem;
+}
+
+form {
+  display: grid;
+  gap: 0.5rem;
+  max-width: 34rem;
+}
+
+label {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+input,
+select,
+textarea {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font: inherit;
+  padding: 0.4rem 0.5rem;
+  width: 100%;
+}
+
+textarea {
+  min-height: 6rem;
+}
+
+button {
+  background: var(--accent);
+  border: 0;
+  border-radius: 4px;
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+  justify-self: start;
+  padding: 0.45rem 1rem;
+}
+
+button[disabled] {
+  background: var(--line);
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+table.grid {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-collapse: collapse;
+  border-radius: 6px;
+  margin-bottom: 1rem;
+  width: 100%;
+}
+
+table.grid th,
+table.grid td {
+  border-bottom: 1px solid var(--line);
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+
+table.grid th {
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+}
+
+tr.device {
+  cursor: pointer;
+}
+
+.field {
+  display: flex;
+  gap: 1rem;
+  justify-content: space-between;
+  padding: 0.25rem 0;
+}
+
+.field .label {
+  color: var(--muted);
+}
+
+.empty,
+.hint {
+  color: var(--muted);
+}
+
+.error,
+.field-error,
+.warning {
+  color: var(--bad);
+}
+
+.copy-field {
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+}
