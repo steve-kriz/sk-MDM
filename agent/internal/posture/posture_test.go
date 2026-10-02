@@ -515,6 +515,165 @@ func TestUnit_FailingProbeAddsWarning(t *testing.T) {
 	}
 }
 
+// buildWindowsRunner arranges a fake runner replaying fixtureName for the
+// antivirus probe and the unchanged fixture for every other Windows probe.
+func buildWindowsRunner(t *testing.T, fixturePath string) *fake.CommandRunner {
+	t.Helper()
+	runner := fake.NewCommandRunner()
+	for _, p := range posture.Probes("windows") {
+		if p.Name == posture.ProbeAntivirus {
+			data, err := os.ReadFile(fixturePath)
+			if err != nil {
+				t.Fatalf("failed to load %s: %v", fixturePath, err)
+			}
+			runner.Results[p.String()] = platform.CommandResult{Stdout: string(data), ExitCode: 0}
+			continue
+		}
+		content, err := loadFixture("windows", p.Name)
+		if err == nil {
+			runner.Results[p.String()] = platform.CommandResult{Stdout: content, ExitCode: 0}
+		}
+	}
+	return runner
+}
+
+// TestScenario_WindowsAntivirusProbeQueriesDefenderAndSecurityCenter covers the
+// probe script's text and the unchanged existing fixture.
+func TestScenario_WindowsAntivirusProbeQueriesDefenderAndSecurityCenter(t *testing.T) {
+	var antivirusProbe posture.Probe
+	for _, p := range posture.Probes("windows") {
+		if p.Name == posture.ProbeAntivirus {
+			antivirusProbe = p
+		}
+	}
+	if len(antivirusProbe.Args) == 0 {
+		t.Fatal("antivirus probe has no args")
+	}
+	script := antivirusProbe.Args[len(antivirusProbe.Args)-1]
+
+	if !strings.Contains(script, "Get-MpComputerStatus -ErrorAction SilentlyContinue") {
+		t.Error("script should contain Get-MpComputerStatus -ErrorAction SilentlyContinue")
+	}
+	if !strings.Contains(script, "Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue") {
+		t.Error("script should contain the Security Center query")
+	}
+	if !strings.Contains(script, "product=$($_.productState)|$($_.displayName)") {
+		t.Error("script should print one product line per product")
+	}
+
+	// The unchanged fixture still yields the same antivirus block.
+	runner := buildWindowsRunner(t, filepath.Join("testdata", "windows", "antivirus.txt"))
+	clock := fake.NewClock(time.Now())
+	pos, err := posture.Collect(runner, clock, "windows")
+	if err != nil {
+		t.Fatalf("Collect failed: %v", err)
+	}
+	if pos.Antivirus.Name != "Microsoft Defender" || !pos.Antivirus.Enabled || pos.Antivirus.DefinitionsAgeDays != 1 {
+		t.Errorf("antivirus = %+v, want {Microsoft Defender true 1}", pos.Antivirus)
+	}
+}
+
+// TestScenario_ActiveThirdPartyAntivirusSatisfiesEnabled covers the new
+// antivirus-thirdparty.txt fixture.
+func TestScenario_ActiveThirdPartyAntivirusSatisfiesEnabled(t *testing.T) {
+	runner := buildWindowsRunner(t, filepath.Join("testdata", "windows", "antivirus-thirdparty.txt"))
+	clock := fake.NewClock(time.Now())
+
+	pos, err := posture.Collect(runner, clock, "windows")
+	if err != nil {
+		t.Fatalf("Collect failed: %v", err)
+	}
+	if pos.Antivirus.Name != "Contoso Endpoint Security" {
+		t.Errorf("antivirus.name = %q, want Contoso Endpoint Security", pos.Antivirus.Name)
+	}
+	if !pos.Antivirus.Enabled {
+		t.Error("antivirus.enabled should be true")
+	}
+	if pos.Antivirus.DefinitionsAgeDays != 0 {
+		t.Errorf("antivirus.definitionsAgeDays = %d, want 0", pos.Antivirus.DefinitionsAgeDays)
+	}
+	for _, w := range pos.Warnings {
+		if w == "antivirus:unparseable" {
+			t.Error("warnings should not contain antivirus:unparseable")
+		}
+	}
+}
+
+// TestScenario_InactiveOrMalformedProductLinesDoNotCountAsActive covers every
+// product line that must not flip antivirus.enabled to true.
+func TestScenario_InactiveOrMalformedProductLinesDoNotCountAsActive(t *testing.T) {
+	cases := []string{
+		"product=393472|Off AV",
+		"product=270336|Snoozed AV",
+		"product=abc|Bad AV",
+		"product=266240|",
+		"product=266240",
+	}
+
+	for _, line := range cases {
+		t.Run(line, func(t *testing.T) {
+			runner := fake.NewCommandRunner()
+			for _, p := range posture.Probes("windows") {
+				if p.Name == posture.ProbeAntivirus {
+					stdout := "name=Microsoft Defender\nenabled=False\ndefinitionsAgeDays=0\n" + line
+					runner.Results[p.String()] = platform.CommandResult{Stdout: stdout, ExitCode: 0}
+					continue
+				}
+				content, err := loadFixture("windows", p.Name)
+				if err == nil {
+					runner.Results[p.String()] = platform.CommandResult{Stdout: content, ExitCode: 0}
+				}
+			}
+			clock := fake.NewClock(time.Now())
+
+			pos, err := posture.Collect(runner, clock, "windows")
+			if err != nil {
+				t.Fatalf("Collect failed: %v", err)
+			}
+			if pos.Antivirus.Enabled {
+				t.Errorf("antivirus.enabled should be false for line %q", line)
+			}
+			if pos.Antivirus.Name != "Microsoft Defender" {
+				t.Errorf("antivirus.name = %q, want Microsoft Defender for line %q", pos.Antivirus.Name, line)
+			}
+		})
+	}
+}
+
+// TestScenario_JunkAntivirusOutputIsStillUnparseable covers the 1 MB junk case
+// still producing the existing warning, unaffected by the product-line parse.
+func TestScenario_JunkAntivirusOutputIsStillUnparseable(t *testing.T) {
+	runner := fake.NewCommandRunner()
+	for _, p := range posture.Probes("windows") {
+		if p.Name == posture.ProbeAntivirus {
+			runner.Results[p.String()] = platform.CommandResult{
+				Stdout:   strings.Repeat("x", 1024*1024),
+				ExitCode: 0,
+			}
+			continue
+		}
+		content, err := loadFixture("windows", p.Name)
+		if err == nil {
+			runner.Results[p.String()] = platform.CommandResult{Stdout: content, ExitCode: 0}
+		}
+	}
+	clock := fake.NewClock(time.Now())
+
+	pos, err := posture.Collect(runner, clock, "windows")
+	if err != nil {
+		t.Fatalf("Collect failed: %v", err)
+	}
+	found := false
+	for _, w := range pos.Warnings {
+		if w == "antivirus:unparseable" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("warnings should contain antivirus:unparseable, got %v", pos.Warnings)
+	}
+}
+
 // TestUnit_MultipleWarnings tests that multiple warnings accumulate.
 func TestUnit_MultipleWarnings(t *testing.T) {
 	runner := fake.NewCommandRunner()

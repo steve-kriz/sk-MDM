@@ -10,8 +10,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/officehq/sk-mdm/agent/internal/antivirus"
 	"github.com/officehq/sk-mdm/agent/internal/client"
 	"github.com/officehq/sk-mdm/agent/internal/contract"
+	"github.com/officehq/sk-mdm/agent/internal/platform"
 	"github.com/officehq/sk-mdm/agent/internal/platform/fake"
 	"github.com/officehq/sk-mdm/agent/internal/policy"
 	"github.com/officehq/sk-mdm/agent/internal/state"
@@ -45,7 +47,6 @@ func (m *mockTransport) Do(method, path string, body []byte) (*http.Response, er
 	}
 	return fake.Response(http.StatusOK, "{}"), nil
 }
-
 
 // TestScenario_OneCycleCollectsFetchesPoliciesAndPosts tests one full cycle.
 func TestScenario_OneCycleCollectsFetchesPoliciesAndPosts(t *testing.T) {
@@ -334,11 +335,11 @@ func TestScenario_IntervalIsHonouredWithJitter(t *testing.T) {
 	stateStore := &fakeStore{state: st}
 
 	deps := &Deps{
-		Client: transport,
-		Store:  stateStore,
-		FS:     fsys,
-		Clock:  clock,
-		GOOS:   "darwin",
+		Client:          transport,
+		Store:           stateStore,
+		FS:              fsys,
+		Clock:           clock,
+		GOOS:            "darwin",
 		IntervalSeconds: 600,
 		CollectInventory: func() (contract.Inventory, error) {
 			return inv, nil
@@ -465,11 +466,11 @@ func TestScenario_OfflineCycleSpoolsToDisk(t *testing.T) {
 	spoolDir := "/spool"
 
 	deps := &Deps{
-		Client: transport,
-		Store:  stateStore,
-		FS:     fsys,
-		Clock:  clock,
-		GOOS:   "darwin",
+		Client:   transport,
+		Store:    stateStore,
+		FS:       fsys,
+		Clock:    clock,
+		GOOS:     "darwin",
 		SpoolDir: spoolDir,
 		CollectInventory: func() (contract.Inventory, error) {
 			return inv, nil
@@ -533,11 +534,11 @@ func TestScenario_SpoolIsCapped(t *testing.T) {
 	stateStore := &fakeStore{state: st}
 
 	deps := &Deps{
-		Client: transport,
-		Store:  stateStore,
-		FS:     fsys,
-		Clock:  clock,
-		GOOS:   "darwin",
+		Client:   transport,
+		Store:    stateStore,
+		FS:       fsys,
+		Clock:    clock,
+		GOOS:     "darwin",
 		SpoolDir: spoolDir,
 		CollectInventory: func() (contract.Inventory, error) {
 			return inv, nil
@@ -1168,10 +1169,416 @@ func TestScenario_FirewallViolationStillReportedInEnforcingCycle(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// TASK-030: Antivirus Findings Wiring Tests
+// ============================================================================
+
+// TestScenario_FindingsPostedEvenWhenBundleFetchFails covers the independence
+// of the findings step from the bundle fetch.
+func TestScenario_FindingsPostedEvenWhenBundleFetchFails(t *testing.T) {
+	clock := fake.NewClock(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC))
+	fsys := fake.NewFS()
+
+	st := state.State{DeviceID: "d1", DeviceSecret: "secret"}
+	stateData, _ := json.Marshal(st)
+	fsys.Seed(state.StatePath("windows"), stateData)
+
+	var checkinBody []byte
+	transport := &mockTransport{
+		doFunc: func(method, path string, body []byte) (*http.Response, error) {
+			if method == "GET" && strings.Contains(path, "policies") {
+				return fake.Response(http.StatusServiceUnavailable, "{}"), nil
+			}
+			if method == "POST" && strings.Contains(path, "checkin") {
+				checkinBody = body
+				return fake.Response(http.StatusOK, "{}"), nil
+			}
+			return fake.Response(http.StatusOK, "{}"), nil
+		},
+	}
+
+	stateStore := &fakeStore{state: st}
+	deps := &Deps{
+		Client: transport,
+		Store:  stateStore,
+		FS:     fsys,
+		Clock:  clock,
+		GOOS:   "windows",
+		CollectInventory: func() (contract.Inventory, error) {
+			return contract.Inventory{}, nil
+		},
+		CollectPosture: func() (contract.Posture, error) {
+			return contract.Posture{}, nil
+		},
+		CollectAntivirusFindings: func() ([]contract.AntivirusFinding, []string) {
+			return []contract.AntivirusFinding{{
+				FindingID:  "f1",
+				ThreatName: "Trojan",
+				Severity:   "severe",
+				DetectedAt: "2026-10-02T00:00:00Z",
+				Resources:  []string{},
+				Remediated: false,
+			}}, nil
+		},
+	}
+
+	if err := RunOnce(context.Background(), deps); err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+
+	var req contract.CheckInRequest
+	if err := json.Unmarshal(checkinBody, &req); err != nil {
+		t.Fatalf("failed to unmarshal checkin body: %v", err)
+	}
+	if len(req.PolicyCompliance) != 0 {
+		t.Errorf("expected no policyCompliance, got %v", req.PolicyCompliance)
+	}
+	if strings.Contains(string(checkinBody), `"policyCompliance"`) {
+		t.Error("checkin body should carry no policyCompliance key")
+	}
+	if len(req.AntivirusFindings) != 1 {
+		t.Fatalf("expected 1 antivirus finding, got %d", len(req.AntivirusFindings))
+	}
+}
+
+// TestScenario_ThirdPartyActiveDefenderStoppedYieldsNoFindingsNoWarning covers
+// the default CollectAntivirusFindings wiring to antivirus.CollectFindings
+// through a real fake runner.
+func TestScenario_ThirdPartyActiveDefenderStoppedYieldsNoFindingsNoWarning(t *testing.T) {
+	clock := fake.NewClock(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC))
+	fsys := fake.NewFS()
+
+	st := state.State{DeviceID: "d1", DeviceSecret: "secret"}
+	stateData, _ := json.Marshal(st)
+	fsys.Seed(state.StatePath("windows"), stateData)
+
+	runner := fake.NewCommandRunner()
+	findingsKey := fake.Command{
+		Name: "powershell.exe",
+		Args: []string{"-NoProfile", "-NonInteractive", "-Command", antivirus.WindowsFindingsScript},
+	}.String()
+	runner.Results[findingsKey] = platform.CommandResult{Stdout: "", ExitCode: 0}
+
+	var checkinBody []byte
+	transport := &mockTransport{
+		doFunc: func(method, path string, body []byte) (*http.Response, error) {
+			if method == "GET" && strings.Contains(path, "policies") {
+				return fake.Response(http.StatusServiceUnavailable, "{}"), nil
+			}
+			if method == "POST" && strings.Contains(path, "checkin") {
+				checkinBody = body
+				return fake.Response(http.StatusOK, "{}"), nil
+			}
+			return fake.Response(http.StatusOK, "{}"), nil
+		},
+	}
+
+	stateStore := &fakeStore{state: st}
+	deps := &Deps{
+		Client: transport,
+		Store:  stateStore,
+		FS:     fsys,
+		Clock:  clock,
+		GOOS:   "windows",
+		Runner: runner,
+		CollectInventory: func() (contract.Inventory, error) {
+			return contract.Inventory{}, nil
+		},
+		CollectPosture: func() (contract.Posture, error) {
+			// The posture the antivirus-thirdparty.txt fixture produces:
+			// Defender off, a third-party product active.
+			return contract.Posture{
+				Antivirus: contract.Antivirus{Name: "Contoso Endpoint Security", Enabled: true, DefinitionsAgeDays: 0},
+			}, nil
+		},
+	}
+
+	if err := RunOnce(context.Background(), deps); err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+
+	if strings.Contains(string(checkinBody), `"antivirusFindings"`) {
+		t.Errorf("checkin body should carry no antivirusFindings key, got %s", checkinBody)
+	}
+	for _, warning := range []string{antivirus.WarningFindings, antivirus.WarningFindingsTimeout, antivirus.WarningFindingsUnparseable} {
+		if strings.Contains(string(checkinBody), warning) {
+			t.Errorf("checkin body should not carry warning %q, got %s", warning, checkinBody)
+		}
+	}
+}
+
+// TestScenario_FindingsProbeFailureDoesNotCostTheCheckIn covers that the
+// default CollectAntivirusFindings wiring reports a failing probe as a
+// posture warning, through RunOnce, and still posts the check-in.
+func TestScenario_FindingsProbeFailureDoesNotCostTheCheckIn(t *testing.T) {
+	clock := fake.NewClock(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC))
+	fsys := fake.NewFS()
+
+	st := state.State{DeviceID: "d1", DeviceSecret: "secret"}
+	stateData, _ := json.Marshal(st)
+	fsys.Seed(state.StatePath("windows"), stateData)
+
+	runner := fake.NewCommandRunner()
+	findingsKey := fake.Command{
+		Name: "powershell.exe",
+		Args: []string{"-NoProfile", "-NonInteractive", "-Command", antivirus.WindowsFindingsScript},
+	}.String()
+	runner.Results[findingsKey] = platform.CommandResult{ExitCode: 1}
+
+	var checkinBody []byte
+	transport := &mockTransport{
+		doFunc: func(method, path string, body []byte) (*http.Response, error) {
+			if method == "GET" && strings.Contains(path, "policies") {
+				return fake.Response(http.StatusServiceUnavailable, "{}"), nil
+			}
+			if method == "POST" && strings.Contains(path, "checkin") {
+				checkinBody = body
+				return fake.Response(http.StatusOK, "{}"), nil
+			}
+			return fake.Response(http.StatusOK, "{}"), nil
+		},
+	}
+
+	stateStore := &fakeStore{state: st}
+	deps := &Deps{
+		Client: transport,
+		Store:  stateStore,
+		FS:     fsys,
+		Clock:  clock,
+		GOOS:   "windows",
+		Runner: runner,
+		CollectInventory: func() (contract.Inventory, error) {
+			return contract.Inventory{}, nil
+		},
+		CollectPosture: func() (contract.Posture, error) {
+			return contract.Posture{}, nil
+		},
+	}
+
+	if err := RunOnce(context.Background(), deps); err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+
+	var req contract.CheckInRequest
+	if err := json.Unmarshal(checkinBody, &req); err != nil {
+		t.Fatalf("failed to unmarshal checkin body: %v", err)
+	}
+	found := false
+	for _, w := range req.Posture.Warnings {
+		if w == antivirus.WarningFindings {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("posture.warnings should contain %q, got %v", antivirus.WarningFindings, req.Posture.Warnings)
+	}
+	if len(req.AntivirusFindings) != 0 {
+		t.Errorf("expected no antivirus findings, got %v", req.AntivirusFindings)
+	}
+	if strings.Contains(string(checkinBody), `"antivirusFindings":[`) {
+		t.Errorf("checkin body should carry no antivirusFindings key, got %s", checkinBody)
+	}
+}
+
+// TestScenario_EnforcingCycleStillReportsPreEnforcementPosture covers that
+// posture is collected exactly once and the check-in reports the posture
+// found before enforcement ran.
+func TestScenario_EnforcingCycleStillReportsPreEnforcementPosture(t *testing.T) {
+	clock := fake.NewClock(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC))
+	fsys := fake.NewFS()
+
+	st := state.State{DeviceID: "d1", DeviceSecret: "secret"}
+	stateData, _ := json.Marshal(st)
+	fsys.Seed(state.StatePath("windows"), stateData)
+
+	bundle := contract.PolicyBundleResponse{
+		DeviceID: "d1",
+		Policies: []contract.Policy{
+			{PolicyID: "av-policy", Version: 1, Settings: map[string]any{"antivirusEnabled": true}},
+		},
+		Conflicts:         []contract.Conflict{},
+		EffectiveSettings: map[string]any{"antivirusEnabled": true},
+	}
+
+	posture := contract.Posture{Antivirus: contract.Antivirus{Enabled: false}}
+	var postureCollections int
+	var checkinBody []byte
+	var enforceCalled bool
+
+	transport := &mockTransport{
+		doFunc: func(method, path string, body []byte) (*http.Response, error) {
+			if method == "GET" && strings.Contains(path, "policies") {
+				data, _ := json.Marshal(bundle)
+				return fake.Response(http.StatusOK, string(data)), nil
+			}
+			if method == "POST" && strings.Contains(path, "checkin") {
+				checkinBody = body
+				return fake.Response(http.StatusOK, "{}"), nil
+			}
+			return fake.Response(http.StatusOK, "{}"), nil
+		},
+	}
+
+	stateStore := &fakeStore{state: st}
+	deps := &Deps{
+		Client: transport,
+		Store:  stateStore,
+		FS:     fsys,
+		Clock:  clock,
+		GOOS:   "windows",
+		CollectInventory: func() (contract.Inventory, error) {
+			return contract.Inventory{}, nil
+		},
+		CollectPosture: func() (contract.Posture, error) {
+			postureCollections++
+			return posture, nil
+		},
+		// Evaluate left nil: the production policy.Evaluate runs.
+		Enforce: func(ctx context.Context, effective map[string]any, p contract.Posture) {
+			enforceCalled = true
+		},
+	}
+
+	if err := RunOnce(context.Background(), deps); err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+
+	if postureCollections != 1 {
+		t.Errorf("posture should be collected exactly once, got %d", postureCollections)
+	}
+	if !enforceCalled {
+		t.Error("expected Enforce to be called")
+	}
+
+	var req contract.CheckInRequest
+	if err := json.Unmarshal(checkinBody, &req); err != nil {
+		t.Fatalf("failed to unmarshal checkin body: %v", err)
+	}
+	if len(req.PolicyCompliance) != 1 {
+		t.Fatalf("expected 1 policy compliance entry, got %d", len(req.PolicyCompliance))
+	}
+	found := false
+	for _, v := range req.PolicyCompliance[0].Violations {
+		if v == policy.ViolationAntivirusDisabled {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected violation %s, got %v", policy.ViolationAntivirusDisabled, req.PolicyCompliance[0].Violations)
+	}
+}
+
+// TestScenario_NoDetectionsYieldsNoFindingsKey covers both goos values: a
+// collector reporting nothing leaves no antivirusFindings key on the wire.
+func TestScenario_NoDetectionsYieldsNoFindingsKey(t *testing.T) {
+	for _, goos := range []string{"windows", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			clock := fake.NewClock(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC))
+			fsys := fake.NewFS()
+
+			st := state.State{DeviceID: "d1", DeviceSecret: "secret"}
+			stateData, _ := json.Marshal(st)
+			fsys.Seed(state.StatePath(goos), stateData)
+
+			var checkinBody []byte
+			transport := &mockTransport{
+				doFunc: func(method, path string, body []byte) (*http.Response, error) {
+					if method == "GET" && strings.Contains(path, "policies") {
+						return fake.Response(http.StatusServiceUnavailable, "{}"), nil
+					}
+					if method == "POST" && strings.Contains(path, "checkin") {
+						checkinBody = body
+						return fake.Response(http.StatusOK, "{}"), nil
+					}
+					return fake.Response(http.StatusOK, "{}"), nil
+				},
+			}
+
+			stateStore := &fakeStore{state: st}
+			deps := &Deps{
+				Client: transport,
+				Store:  stateStore,
+				FS:     fsys,
+				Clock:  clock,
+				GOOS:   goos,
+				CollectInventory: func() (contract.Inventory, error) {
+					return contract.Inventory{}, nil
+				},
+				CollectPosture: func() (contract.Posture, error) {
+					return contract.Posture{}, nil
+				},
+				CollectAntivirusFindings: func() ([]contract.AntivirusFinding, []string) {
+					return nil, nil
+				},
+			}
+
+			if err := RunOnce(context.Background(), deps); err != nil {
+				t.Fatalf("RunOnce failed: %v", err)
+			}
+			if strings.Contains(string(checkinBody), `"antivirusFindings"`) {
+				t.Errorf("checkin body should carry no antivirusFindings key, got %s", checkinBody)
+			}
+			if strings.Contains(string(checkinBody), "antivirusFindings:") {
+				t.Errorf("checkin body should carry no antivirusFindings warning, got %s", checkinBody)
+			}
+		})
+	}
+}
+
+// TestScenario_NoRunnerMeansNoFindingsStep covers the seam's nil-defaulting
+// rule: with both Runner and CollectAntivirusFindings nil, no findings step
+// runs at all.
+func TestScenario_NoRunnerMeansNoFindingsStep(t *testing.T) {
+	clock := fake.NewClock(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC))
+	fsys := fake.NewFS()
+
+	st := state.State{DeviceID: "d1", DeviceSecret: "secret"}
+	stateData, _ := json.Marshal(st)
+	fsys.Seed(state.StatePath("darwin"), stateData)
+
+	var checkinBody []byte
+	transport := &mockTransport{
+		doFunc: func(method, path string, body []byte) (*http.Response, error) {
+			if method == "GET" && strings.Contains(path, "policies") {
+				return fake.Response(http.StatusServiceUnavailable, "{}"), nil
+			}
+			if method == "POST" && strings.Contains(path, "checkin") {
+				checkinBody = body
+				return fake.Response(http.StatusOK, "{}"), nil
+			}
+			return fake.Response(http.StatusOK, "{}"), nil
+		},
+	}
+
+	stateStore := &fakeStore{state: st}
+	deps := &Deps{
+		Client: transport,
+		Store:  stateStore,
+		FS:     fsys,
+		Clock:  clock,
+		GOOS:   "darwin",
+		// Runner is left nil deliberately.
+		CollectInventory: func() (contract.Inventory, error) {
+			return contract.Inventory{}, nil
+		},
+		CollectPosture: func() (contract.Posture, error) {
+			return contract.Posture{}, nil
+		},
+		// CollectAntivirusFindings is left nil deliberately.
+	}
+
+	if err := RunOnce(context.Background(), deps); err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+	if strings.Contains(string(checkinBody), `"antivirusFindings"`) {
+		t.Errorf("checkin body should carry no antivirusFindings key, got %s", checkinBody)
+	}
+}
+
 // fakeStore is a simple mock of the state store.
 type fakeStore struct {
-	state           state.State
-	lastSavedState  state.State
+	state          state.State
+	lastSavedState state.State
 }
 
 func (f *fakeStore) Load() (state.State, error) {

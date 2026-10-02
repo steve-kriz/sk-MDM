@@ -1,0 +1,2 @@
+{"detectionId":"{3F2A1B4C-5D6E-4F70-8192-A3B4C5D6E7F8}","threatName":"Trojan:Win32/Wacatac.B!ml","severityId":5,"detectedAt":"2026-10-02T07:15:00Z","resources":["file:_C:\\Users\\a\\Downloads\\invoice.exe"],"actionSuccess":true}
+{"detectionId":"{9A8B7C6D-5E4F-4321-ABCD-0123456789AB}","threatName":"PUA:Win32/Presenoker","severityId":2,"detectedAt":"2026-10-01T22:40:00Z","resources":["file:_C:\\Users\\a\\AppData\\Local\\Temp\\setup.exe","regkey:_HKCU\\Software\\Presenoker"],"actionSuccess":false}

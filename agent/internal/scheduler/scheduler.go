@@ -32,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/officehq/sk-mdm/agent/internal/antivirus"
 	"github.com/officehq/sk-mdm/agent/internal/client"
 	"github.com/officehq/sk-mdm/agent/internal/config"
 	"github.com/officehq/sk-mdm/agent/internal/contract"
@@ -162,6 +163,13 @@ type Deps struct {
 	// next cycle reports the result.
 	Enforce func(ctx context.Context, effective map[string]any, posture contract.Posture)
 
+	// CollectAntivirusFindings overrides antivirus.CollectFindings. It runs
+	// every cycle that posts a check-in, after enforcement, whether or not
+	// the bundle was fetched. It returns the findings and the warnings to add
+	// to the posture. When it and Runner are both nil, no findings are
+	// collected.
+	CollectAntivirusFindings func() ([]contract.AntivirusFinding, []string)
+
 	// AfterCheckIn, when non-nil, is called with the decoded check-in
 	// response at the end of a successful cycle. It is the seam the command
 	// executor plugs into: PendingCommandCount is what tells it whether a
@@ -276,6 +284,12 @@ func runCycle(ctx context.Context, deps *Deps) error {
 			deps.Enforce(ctx, bundle.EffectiveSettings, pst)
 		}
 	}
+
+	// Threat detections travel on every check-in, policy or no policy. A
+	// collection problem is a posture warning, never a lost check-in.
+	findings, findingWarnings := deps.collectAntivirusFindings()
+	req.AntivirusFindings = findings
+	req.Posture.Warnings = append(req.Posture.Warnings, findingWarnings...)
 
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -558,6 +572,18 @@ func (d *Deps) collectPosture() (contract.Posture, error) {
 		return d.CollectPosture()
 	}
 	return posture.Collect(d.Runner, d.Clock, d.goos())
+}
+
+// collectAntivirusFindings runs the injected collector, or the real one when
+// there is a runner to run it with. With neither, nothing is collected.
+func (d *Deps) collectAntivirusFindings() ([]contract.AntivirusFinding, []string) {
+	if d.CollectAntivirusFindings != nil {
+		return d.CollectAntivirusFindings()
+	}
+	if d.Runner == nil {
+		return nil, nil
+	}
+	return antivirus.CollectFindings(d.Runner, d.Clock, d.goos())
 }
 
 // evaluate runs the injected evaluator, or agent/internal/policy.

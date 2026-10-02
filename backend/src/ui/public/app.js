@@ -309,6 +309,7 @@ async function onSubmit(event) {
           localAdminAllowlist: fieldValue(form, 'localAdminAllowlist'),
           firewallBlockedDomains: fieldValue(form, 'firewallBlockedDomains'),
           firewallAllowedDomains: fieldValue(form, 'firewallAllowedDomains'),
+          antivirusEnabled: fieldValue(form, 'antivirusEnabled'),
         },
       }),
     );

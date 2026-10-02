@@ -1,6 +1,7 @@
 package posture
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/officehq/sk-mdm/agent/internal/contract"
@@ -18,8 +19,14 @@ const (
 
 	windowsFirewallScript = `Get-NetFirewallProfile | ForEach-Object { "$($_.Name)=$($_.Enabled)" }`
 
-	windowsAntivirusScript = `$s = Get-MpComputerStatus; "name=Microsoft Defender"; ` +
-		`"enabled=$($s.AntivirusEnabled)"; "definitionsAgeDays=$($s.AntivirusSignatureAge)"`
+	// The antivirus probe tolerates a Defender service a third-party product
+	// has stopped (Get-MpComputerStatus then errors, and the casts turn the
+	// missing values into False and 0) and a host without Security Center
+	// (Windows Server), which simply prints no product lines.
+	windowsAntivirusScript = `$s = Get-MpComputerStatus -ErrorAction SilentlyContinue; "name=Microsoft Defender"; ` +
+		`"enabled=$([bool]$s.AntivirusEnabled)"; "definitionsAgeDays=$([int]$s.AntivirusSignatureAge)"; ` +
+		`Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue | ` +
+		`ForEach-Object { "product=$($_.productState)|$($_.displayName)" }`
 
 	windowsOSUpdateScript = `$au = New-Object -ComObject Microsoft.Update.AutoUpdate; ` +
 		`$searcher = (New-Object -ComObject Microsoft.Update.Session).CreateUpdateSearcher(); ` +
@@ -72,6 +79,8 @@ func fillWindows(p *contract.Posture, stdout map[string]string) []string {
 	if out, ok := stdout[ProbeAntivirus]; ok {
 		if !fillAntivirus(&p.Antivirus, out) {
 			warnings = append(warnings, unparseable(ProbeAntivirus))
+		} else {
+			applySecurityCenterProducts(&p.Antivirus, out)
 		}
 	}
 
@@ -142,4 +151,45 @@ func parseAccountList(out string) ([]string, bool) {
 		return nil, false
 	}
 	return accounts, true
+}
+
+// Security Center productState bits. The scanner-state nibble is on (0x1000),
+// off (0x0000), snoozed (0x2000) or expired (0x3000); only on counts as active.
+const (
+	productScannerStateMask = 0xF000
+	productScannerStateOn   = 0x1000
+)
+
+// applySecurityCenterProducts reads the "product=<productState>|<displayName>"
+// lines the antivirus probe prints for every product Windows Security Center
+// lists. When Defender itself reports off but another product is active,
+// antivirus counts as enabled and is named after the first active product.
+// A line with a non-integer state, no "|" or an empty display name is ignored.
+func applySecurityCenterProducts(av *contract.Antivirus, out string) {
+	if av.Enabled {
+		return
+	}
+	for _, line := range splitLines(out) {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(key) != "product" {
+			continue
+		}
+		stateText, name, ok := strings.Cut(value, "|")
+		if !ok {
+			continue
+		}
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		state, err := strconv.ParseInt(strings.TrimSpace(stateText), 10, 64)
+		if err != nil {
+			continue
+		}
+		if state&productScannerStateMask == productScannerStateOn {
+			av.Enabled = true
+			av.Name = name
+			return
+		}
+	}
 }

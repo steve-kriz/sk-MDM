@@ -1,9 +1,13 @@
 // Package policy evaluates the device's policy bundle against the posture the
 // agent just collected and reports the result on the next check-in.
 //
-// v1 reports, it does not enforce: a violation found here travels to the
-// backend as one entry of CheckInRequest.policyCompliance, and whatever has to
-// change on the device is done by a command the backend issues afterwards.
+// This package reports, it does not enforce: a violation found here travels to
+// the backend as one entry of CheckInRequest.policyCompliance. Settings the
+// agent can make true itself are applied after evaluation by the enforcers --
+// agent/internal/enforce for the firewall and domains, and the antivirus
+// enforcer in agent/internal/antivirus, which turns Microsoft Defender on when
+// no antivirus is active -- so the cycle that enforces still reports the
+// posture it found, and the next cycle shows the result.
 //
 // Each entry of the bundle is judged on its own settings rather than on the
 // bundle's effectiveSettings, because a result is reported per policyId and
@@ -36,6 +40,8 @@ const (
 	SettingFirewallEnabled = "firewallEnabled"
 	// SettingDiskEncryptionRequired requires full-disk encryption.
 	SettingDiskEncryptionRequired = "diskEncryptionRequired"
+	// SettingAntivirusEnabled requires an active antivirus product.
+	SettingAntivirusEnabled = "antivirusEnabled"
 	// SettingOSUpdateMaxAgeDays is how old the last OS update check may be.
 	SettingOSUpdateMaxAgeDays = "osUpdateMaxAgeDays"
 	// SettingLocalAdminAllowlist names the accounts allowed to be local
@@ -49,6 +55,7 @@ const (
 const (
 	ViolationFirewallDisabled      = "firewall_disabled"
 	ViolationDiskEncryptionMissing = "disk_encryption_missing"
+	ViolationAntivirusDisabled     = "antivirus_disabled"
 	ViolationOSUpdateOverdue       = "os_update_overdue"
 	ViolationLocalAdminPrefix      = "unauthorized_local_admin:"
 )
@@ -108,7 +115,7 @@ func Evaluate(bundle contract.PolicyBundleResponse, posture contract.Posture, no
 }
 
 // evaluatePolicy judges one policy. Violations are collected in a fixed order
-// — firewall, disk encryption, OS update, then the local administrators sorted
+// — firewall, disk encryption, antivirus, OS update, then the local administrators sorted
 // by account name — so two runs over the same facts produce the same bytes.
 func evaluatePolicy(p contract.Policy, posture contract.Posture, now time.Time) Result {
 	violations := []string{}
@@ -119,6 +126,9 @@ func evaluatePolicy(p contract.Policy, posture contract.Posture, now time.Time) 
 
 	if required, ok := boolSetting(p.Settings, SettingDiskEncryptionRequired); ok && required && !posture.DiskEncryption.Enabled {
 		violations = append(violations, ViolationDiskEncryptionMissing)
+	}
+	if required, ok := boolSetting(p.Settings, SettingAntivirusEnabled); ok && required && !posture.Antivirus.Enabled {
+		violations = append(violations, ViolationAntivirusDisabled)
 	}
 
 	if maxAgeDays, ok := intSetting(p.Settings, SettingOSUpdateMaxAgeDays); ok {

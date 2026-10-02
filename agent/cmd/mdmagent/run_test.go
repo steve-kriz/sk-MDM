@@ -2,12 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
+	"time"
 
+	"github.com/officehq/sk-mdm/agent/internal/antivirus"
+	"github.com/officehq/sk-mdm/agent/internal/config"
 	"github.com/officehq/sk-mdm/agent/internal/contract"
 	"github.com/officehq/sk-mdm/agent/internal/enforce"
 	"github.com/officehq/sk-mdm/agent/internal/platform"
 	"github.com/officehq/sk-mdm/agent/internal/platform/fake"
+	"github.com/officehq/sk-mdm/agent/internal/state"
 )
 
 // TestE2E_NewAgentSetsEnforcementWiring verifies that newAgent sets up the
@@ -48,6 +53,72 @@ func TestE2E_NewAgentSetsEnforcementWiring(t *testing.T) {
 	}
 	if len(calls) > 0 && calls[0].Name != "powershell.exe" {
 		t.Errorf("Expected powershell.exe, got %q", calls[0].Name)
+	}
+}
+
+// TestE2E_NewAgentAppendsAntivirusEnforcerAfterDefaults verifies the AC:
+// newAgent wires deps.Enforce to enforce.Defaults(...) followed by
+// antivirus.NewEnforcer(...), and enforce.Defaults itself is unchanged.
+func TestE2E_NewAgentAppendsAntivirusEnforcerAfterDefaults(t *testing.T) {
+	// Given: a simulated agentEnv with fakes, assembled through newAgent
+	fsys := fake.NewFS()
+	runner := fake.NewCommandRunner()
+	clock := fake.NewClock(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC))
+	doer := fake.NewHTTPDoer()
+
+	cfg := config.Config{CollectionURL: "https://collect.example.com", EnrollmentToken: "tok"}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("failed to marshal config: %v", err)
+	}
+	fsys.Seed(config.Path("windows"), data)
+
+	env := agentEnv{
+		FS:         fsys,
+		Runner:     runner,
+		Clock:      clock,
+		Doer:       doer,
+		GOOS:       "windows",
+		ConfigPath: config.Path("windows"),
+		StatePath:  state.StatePath("windows"),
+	}
+
+	a, err := newAgent(env)
+	if err != nil {
+		t.Fatalf("newAgent failed: %v", err)
+	}
+	if a.deps.Enforce == nil {
+		t.Fatal("expected deps.Enforce to be set")
+	}
+
+	// When: deps.Enforce is called with {antivirusEnabled:true} and a posture
+	// with antivirus off (and nothing requiring the firewall/domains enforcers)
+	effective := map[string]any{antivirus.SettingAntivirusEnabled: true}
+	posture := contract.Posture{Antivirus: contract.Antivirus{Enabled: false}}
+	a.deps.Enforce(context.Background(), effective, posture)
+
+	// Then: the fake runner received exactly the WindowsEnableScript command
+	calls := runner.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("expected exactly 1 runner call, got %d: %v", len(calls), calls)
+	}
+	wantArgs := []string{"-NoProfile", "-NonInteractive", "-Command", antivirus.WindowsEnableScript}
+	if calls[0].Name != "powershell.exe" {
+		t.Errorf("command name = %q, want powershell.exe", calls[0].Name)
+	}
+	if len(calls[0].Args) != len(wantArgs) {
+		t.Fatalf("args = %v, want %v", calls[0].Args, wantArgs)
+	}
+	for i, arg := range wantArgs {
+		if calls[0].Args[i] != arg {
+			t.Errorf("args[%d] = %q, want %q", i, calls[0].Args[i], arg)
+		}
+	}
+
+	// And: enforce.Defaults is unchanged -- still firewall then domains.
+	defaults := enforce.Defaults(runner, fsys, "windows", nil)
+	if len(defaults) != 2 || defaults[0].Name() != "firewall" || defaults[1].Name() != "domains" {
+		t.Errorf("enforce.Defaults should still return [firewall domains], got %v", defaults)
 	}
 }
 

@@ -501,3 +501,96 @@ test('Scenario: Auth failure prevents any database read', async (t) => {
   // Note: We can't easily verify no queries were made since the fake table
   // doesn't track them, but the test setup ensures auth failure stops processing
 });
+
+// ============================================================================
+// TASK-030: antivirusEnabled bundle and conflict tests
+// ============================================================================
+
+test('Scenario: Bundle carries antivirusEnabled and resolves conflicts by policy id', async (t) => {
+  // Given device d1 is in a group assigned p-aaa {antivirusEnabled:true} and p-bbb {antivirusEnabled:false}
+  const table = new FakeTable();
+  table.seedGroupMembership('g1', 'd1');
+  table.seedPolicy('p-aaa', 1, { antivirusEnabled: true });
+  table.seedPolicy('p-bbb', 1, { antivirusEnabled: false });
+  table.seedAssignment('g1', 'p-aaa');
+  table.seedAssignment('g1', 'p-bbb');
+
+  const groupListKey = groupListIndex('');
+  table.seedQueryResponses([
+    {
+      items: [{ groupId: 'g1', gsi1pk: groupListKey.gsi1pk }],
+      cursor: null,
+    },
+    {
+      items: [
+        {
+          policyId: 'p-aaa',
+          gsi1sk: policyAssignmentIndex('g1', 'p-aaa').gsi1sk,
+          gsi1pk: policyAssignmentIndex('g1', 'p-aaa').gsi1pk,
+        },
+        {
+          policyId: 'p-bbb',
+          gsi1sk: policyAssignmentIndex('g1', 'p-bbb').gsi1sk,
+          gsi1pk: policyAssignmentIndex('g1', 'p-bbb').gsi1pk,
+        },
+      ],
+      cursor: null,
+    },
+  ]);
+
+  const handler = createPolicyBundleHandler({
+    table,
+    now: () => new Date('2026-10-02T12:00:00Z'),
+    verifyDevice: createFakeVerifier('d1', true),
+  });
+
+  // When d1 GETs /api/v1/devices/d1/policies
+  const request = createValidRequest('d1');
+  const result = await handler(request);
+
+  // Then effectiveSettings.antivirusEnabled is true and conflicts names p-aaa the winner
+  assert.strictEqual(result.statusCode, 200);
+  assert.strictEqual(result.body.effectiveSettings.antivirusEnabled, true);
+  assert.strictEqual(result.body.conflicts.length, 1);
+  assert.deepStrictEqual(result.body.conflicts[0], {
+    key: 'antivirusEnabled',
+    winningPolicyId: 'p-aaa',
+    value: true,
+    losers: [{ policyId: 'p-bbb', value: false }],
+  });
+});
+
+test('Scenario: effectiveSettings.antivirusEnabled is true for a device holding a single antivirus policy', async (t) => {
+  // Given a device in a group assigned a policy with {antivirusEnabled:true}
+  const table = new FakeTable();
+  table.seedGroupMembership('g1', 'd1');
+  table.seedPolicy('p1', 1, { antivirusEnabled: true });
+  table.seedAssignment('g1', 'p1');
+
+  const groupListKey = groupListIndex('');
+  table.seedQueryResponses([
+    { items: [{ groupId: 'g1', gsi1pk: groupListKey.gsi1pk }], cursor: null },
+    {
+      items: [
+        {
+          policyId: 'p1',
+          gsi1sk: policyAssignmentIndex('g1', 'p1').gsi1sk,
+          gsi1pk: policyAssignmentIndex('g1', 'p1').gsi1pk,
+        },
+      ],
+      cursor: null,
+    },
+  ]);
+
+  const handler = createPolicyBundleHandler({
+    table,
+    now: () => new Date('2026-10-02T12:00:00Z'),
+    verifyDevice: createFakeVerifier('d1', true),
+  });
+
+  const request = createValidRequest('d1');
+  const result = await handler(request);
+
+  assert.strictEqual(result.statusCode, 200);
+  assert.strictEqual(result.body.effectiveSettings.antivirusEnabled, true);
+});

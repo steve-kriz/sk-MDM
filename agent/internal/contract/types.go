@@ -93,9 +93,13 @@ type Firewall struct {
 
 // Antivirus is the antivirus block of Posture.
 type Antivirus struct {
-	Name               string `json:"name"`
-	Enabled            bool   `json:"enabled"`
-	DefinitionsAgeDays int    `json:"definitionsAgeDays"`
+	Name string `json:"name"`
+	// Enabled is true when antivirus is active on the device. On Windows that
+	// means Microsoft Defender reports itself enabled, or any antivirus
+	// product registered with Windows Security Center is active; on macOS it
+	// means the XProtect bundle is present.
+	Enabled            bool `json:"enabled"`
+	DefinitionsAgeDays int  `json:"definitionsAgeDays"`
 }
 
 // OSUpdate is the osUpdate block of Posture.
@@ -128,17 +132,31 @@ type PolicyComplianceEntry struct {
 	Violations []string `json:"violations"` // e.g. "firewall_disabled"
 }
 
+// AntivirusFinding is one threat detection the device's antivirus reported:
+// a Microsoft Defender detection on Windows, an XProtect Remediator event on
+// macOS. All six fields are always present.
+type AntivirusFinding struct {
+	FindingID  string   `json:"findingId"`
+	ThreatName string   `json:"threatName"`
+	Severity   string   `json:"severity"`   // unknown, low, moderate, high or severe
+	DetectedAt string   `json:"detectedAt"` // ISO-8601 UTC
+	Resources  []string `json:"resources"`
+	Remediated bool     `json:"remediated"`
+}
+
 // CheckInRequest is the body of POST /api/v1/devices/{deviceId}/checkin.
 //
 // PolicyCompliance and AgentVersion are omitempty: a check-in that reports
 // nothing marshals without a "policyCompliance" key, and an agent that does not
-// name its build marshals without an "agentVersion" one.
+// name its build marshals without an "agentVersion" one. AntivirusFindings is
+// omitempty too: a cycle with no detections sends no "antivirusFindings" key.
 type CheckInRequest struct {
-	CollectedAt      string                  `json:"collectedAt"` // ISO-8601 UTC
-	Inventory        Inventory               `json:"inventory"`
-	Posture          Posture                 `json:"posture"`
-	AgentVersion     string                  `json:"agentVersion,omitempty"`
-	PolicyCompliance []PolicyComplianceEntry `json:"policyCompliance,omitempty"`
+	CollectedAt       string                  `json:"collectedAt"` // ISO-8601 UTC
+	Inventory         Inventory               `json:"inventory"`
+	Posture           Posture                 `json:"posture"`
+	AgentVersion      string                  `json:"agentVersion,omitempty"`
+	PolicyCompliance  []PolicyComplianceEntry `json:"policyCompliance,omitempty"`
+	AntivirusFindings []AntivirusFinding      `json:"antivirusFindings,omitempty"`
 }
 
 // AgentRelease is the agent build a device is being moved to: the agent
