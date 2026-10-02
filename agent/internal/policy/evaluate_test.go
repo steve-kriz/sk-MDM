@@ -449,6 +449,50 @@ func TestScenario_UpdateAgeDaysCalculation(t *testing.T) {
 	}
 }
 
+// TestScenario_DomainOnlyPolicyIsCompliant tests that a policy whose settings
+// hold only firewallBlockedDomains and/or firewallAllowedDomains evaluates
+// compliant true with violations [], per AC18: these keys are enforced by
+// agent/internal/enforce, not judged here.
+func TestScenario_DomainOnlyPolicyIsCompliant(t *testing.T) {
+	// Given: a policy whose settings are {firewallBlockedDomains:["a.com"], firewallAllowedDomains:["b.com"]}
+	bundle := contract.PolicyBundleResponse{
+		Policies: []contract.Policy{
+			{
+				PolicyID: "domain-policy",
+				Version:  1,
+				Settings: map[string]any{
+					"firewallBlockedDomains": []string{"a.com"},
+					"firewallAllowedDomains": []string{"b.com"},
+				},
+			},
+		},
+	}
+	posture := contract.Posture{}
+	now := time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)
+
+	// When: policy.Evaluate runs
+	results := Evaluate(bundle, posture, now)
+
+	// Then: the result is compliant true with violations []
+	if len(results) != 1 {
+		t.Fatalf("Expected 1 result, got %d", len(results))
+	}
+	if !results[0].Compliant {
+		t.Errorf("Expected compliant true, got false with violations %v", results[0].Violations)
+	}
+	if len(results[0].Violations) != 0 {
+		t.Errorf("Expected empty violations, got %v", results[0].Violations)
+	}
+
+	data, err := json.Marshal(results[0])
+	if err != nil {
+		t.Fatalf("Failed to marshal result: %v", err)
+	}
+	if !strings.Contains(string(data), `"violations":[]`) {
+		t.Errorf("Expected violations marshaled as [], got: %s", string(data))
+	}
+}
+
 // Helper for substring check in violations
 func contains(violations []string, s string) bool {
 	for _, v := range violations {

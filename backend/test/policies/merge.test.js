@@ -197,3 +197,21 @@ test('Scenario: Version numbers are preserved in policies list', (t) => {
   // Version is not in the result, but let's verify we don't lose data
   assert.strictEqual(result.effectiveSettings.firewallEnabled, true);
 });
+
+test('Scenario: Domain lists merge by smallest policy id, not unioned', (t) => {
+  const policies = [
+    { policyId: 'p-aaa', version: 1, settings: { firewallBlockedDomains: ['a.com'] } },
+    { policyId: 'p-bbb', version: 1, settings: { firewallBlockedDomains: ['b.com'] } },
+  ];
+  const result = mergePolicySettings(policies);
+
+  // p-aaa is lexicographically smallest, so it wins
+  assert.deepStrictEqual(result.effectiveSettings.firewallBlockedDomains, ['a.com']);
+
+  // Conflict recorded with p-aaa winning and p-bbb as loser
+  assert.strictEqual(result.conflicts.length, 1);
+  const conflict = result.conflicts[0];
+  assert.strictEqual(conflict.key, 'firewallBlockedDomains');
+  assert.strictEqual(conflict.winningPolicyId, 'p-aaa');
+  assert.ok(conflict.losers.some(loser => loser.policyId === 'p-bbb'));
+});

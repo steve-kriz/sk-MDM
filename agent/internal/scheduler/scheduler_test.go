@@ -853,6 +853,321 @@ func TestScenario_NoApplyUpdateWhenNoReleaseAdvertised(t *testing.T) {
 	}
 }
 
+// TestScenario_EnforceCalledAfterEvaluateAndBeforeCheckIn tests that the
+// Enforce seam is called exactly once per cycle, with the bundle's
+// EffectiveSettings and the posture collected that cycle, after Evaluate and
+// before the check-in POST.
+func TestScenario_EnforceCalledAfterEvaluateAndBeforeCheckIn(t *testing.T) {
+	// Given: a scheduler with an Enforce seam and a bundle with effectiveSettings {firewallEnabled:true}
+	clock := fake.NewClock(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC))
+	fsys := fake.NewFS()
+
+	st := state.State{DeviceID: "d1", DeviceSecret: "secret"}
+	stateData, _ := json.Marshal(st)
+	fsys.Seed(state.StatePath("darwin"), stateData)
+
+	inv := contract.Inventory{}
+	pst := contract.Posture{Firewall: contract.Firewall{Enabled: true}}
+
+	bundle := contract.PolicyBundleResponse{
+		DeviceID:          "d1",
+		Policies:          []contract.Policy{},
+		Conflicts:         []contract.Conflict{},
+		EffectiveSettings: map[string]any{"firewallEnabled": true},
+	}
+
+	var order []string
+	var enforceCount int
+	var capturedEffective map[string]any
+	var capturedPosture contract.Posture
+
+	transport := &mockTransport{
+		doFunc: func(method, path string, body []byte) (*http.Response, error) {
+			if method == "GET" && strings.Contains(path, "policies") {
+				data, _ := json.Marshal(bundle)
+				return fake.Response(http.StatusOK, string(data)), nil
+			}
+			if method == "POST" && strings.Contains(path, "checkin") {
+				order = append(order, "checkin")
+				return fake.Response(http.StatusOK, "{}"), nil
+			}
+			return fake.Response(http.StatusOK, "{}"), nil
+		},
+	}
+
+	stateStore := &fakeStore{state: st}
+
+	deps := &Deps{
+		Client: transport,
+		Store:  stateStore,
+		FS:     fsys,
+		Clock:  clock,
+		GOOS:   "darwin",
+		CollectInventory: func() (contract.Inventory, error) {
+			return inv, nil
+		},
+		CollectPosture: func() (contract.Posture, error) {
+			return pst, nil
+		},
+		Evaluate: func(b contract.PolicyBundleResponse, p contract.Posture, now time.Time) []policy.Result {
+			order = append(order, "evaluate")
+			return []policy.Result{}
+		},
+		Enforce: func(ctx context.Context, effective map[string]any, posture contract.Posture) {
+			order = append(order, "enforce")
+			enforceCount++
+			capturedEffective = effective
+			capturedPosture = posture
+		},
+	}
+
+	// When: RunOnce runs
+	err := RunOnce(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+
+	// Then: Enforce was called once with that effectiveSettings and the collected posture
+	if enforceCount != 1 {
+		t.Fatalf("Expected Enforce called exactly once, got %d", enforceCount)
+	}
+	if capturedEffective["firewallEnabled"] != true {
+		t.Errorf("Expected effective settings firewallEnabled true, got %v", capturedEffective)
+	}
+	if !capturedPosture.Firewall.Enabled {
+		t.Errorf("Expected the collected posture to be passed through, got %v", capturedPosture)
+	}
+
+	// And: Enforce ran after Evaluate and before the check-in post
+	if len(order) != 3 {
+		t.Fatalf("Expected 3 recorded steps, got %v", order)
+	}
+	if order[0] != "evaluate" || order[1] != "enforce" || order[2] != "checkin" {
+		t.Fatalf("Expected order [evaluate enforce checkin], got %v", order)
+	}
+}
+
+// TestScenario_EnforceNotCalledWhenBundleFetchFails tests that Enforce is not
+// called when the policy endpoint fails, and that the check-in is still
+// posted.
+func TestScenario_EnforceNotCalledWhenBundleFetchFails(t *testing.T) {
+	// Given: the policy endpoint returns 500
+	clock := fake.NewClock(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC))
+	fsys := fake.NewFS()
+
+	st := state.State{DeviceID: "d1", DeviceSecret: "secret"}
+	stateData, _ := json.Marshal(st)
+	fsys.Seed(state.StatePath("darwin"), stateData)
+
+	inv := contract.Inventory{}
+	pst := contract.Posture{}
+
+	checkinPosted := false
+	transport := &mockTransport{
+		doFunc: func(method, path string, body []byte) (*http.Response, error) {
+			if method == "GET" && strings.Contains(path, "policies") {
+				return fake.Response(http.StatusInternalServerError, "{}"), nil
+			}
+			if method == "POST" && strings.Contains(path, "checkin") {
+				checkinPosted = true
+				return fake.Response(http.StatusOK, "{}"), nil
+			}
+			return fake.Response(http.StatusOK, "{}"), nil
+		},
+	}
+
+	stateStore := &fakeStore{state: st}
+
+	enforceCalled := false
+	deps := &Deps{
+		Client: transport,
+		Store:  stateStore,
+		FS:     fsys,
+		Clock:  clock,
+		GOOS:   "darwin",
+		CollectInventory: func() (contract.Inventory, error) {
+			return inv, nil
+		},
+		CollectPosture: func() (contract.Posture, error) {
+			return pst, nil
+		},
+		Enforce: func(ctx context.Context, effective map[string]any, posture contract.Posture) {
+			enforceCalled = true
+		},
+	}
+
+	// When: RunOnce runs
+	err := RunOnce(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+
+	// Then: Enforce was not called and the check-in was still posted
+	if enforceCalled {
+		t.Error("Expected Enforce not to be called when the bundle fetch failed")
+	}
+	if !checkinPosted {
+		t.Error("Expected the check-in to still be posted")
+	}
+}
+
+// TestScenario_NoEnforceSeamStillChecksIn tests that a scheduler whose
+// Enforce is nil still posts the check-in.
+func TestScenario_NoEnforceSeamStillChecksIn(t *testing.T) {
+	// Given: a scheduler whose Enforce is nil
+	clock := fake.NewClock(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC))
+	fsys := fake.NewFS()
+
+	st := state.State{DeviceID: "d1", DeviceSecret: "secret"}
+	stateData, _ := json.Marshal(st)
+	fsys.Seed(state.StatePath("darwin"), stateData)
+
+	inv := contract.Inventory{}
+	pst := contract.Posture{}
+
+	bundle := contract.PolicyBundleResponse{
+		DeviceID:          "d1",
+		Policies:          []contract.Policy{},
+		Conflicts:         []contract.Conflict{},
+		EffectiveSettings: map[string]any{"firewallEnabled": true},
+	}
+
+	checkinPosted := false
+	transport := &mockTransport{
+		doFunc: func(method, path string, body []byte) (*http.Response, error) {
+			if method == "GET" && strings.Contains(path, "policies") {
+				data, _ := json.Marshal(bundle)
+				return fake.Response(http.StatusOK, string(data)), nil
+			}
+			if method == "POST" && strings.Contains(path, "checkin") {
+				checkinPosted = true
+				return fake.Response(http.StatusOK, "{}"), nil
+			}
+			return fake.Response(http.StatusOK, "{}"), nil
+		},
+	}
+
+	stateStore := &fakeStore{state: st}
+
+	deps := &Deps{
+		Client: transport,
+		Store:  stateStore,
+		FS:     fsys,
+		Clock:  clock,
+		GOOS:   "darwin",
+		CollectInventory: func() (contract.Inventory, error) {
+			return inv, nil
+		},
+		CollectPosture: func() (contract.Posture, error) {
+			return pst, nil
+		},
+		// Enforce left nil.
+	}
+
+	// When: RunOnce runs
+	err := RunOnce(context.Background(), deps)
+
+	// Then: the check-in is posted
+	if err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+	if !checkinPosted {
+		t.Error("Expected the check-in to be posted even with Enforce nil")
+	}
+}
+
+// TestScenario_FirewallViolationStillReportedInEnforcingCycle tests that the
+// production evaluator still reports firewall_disabled in the same cycle a
+// recording Enforce runs, per AC18.
+func TestScenario_FirewallViolationStillReportedInEnforcingCycle(t *testing.T) {
+	// Given: a policy {firewallEnabled:true} and a posture with the firewall off
+	clock := fake.NewClock(time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC))
+	fsys := fake.NewFS()
+
+	st := state.State{DeviceID: "d1", DeviceSecret: "secret"}
+	stateData, _ := json.Marshal(st)
+	fsys.Seed(state.StatePath("darwin"), stateData)
+
+	inv := contract.Inventory{}
+	pst := contract.Posture{Firewall: contract.Firewall{Enabled: false}}
+
+	bundle := contract.PolicyBundleResponse{
+		DeviceID: "d1",
+		Policies: []contract.Policy{
+			{PolicyID: "fw-policy", Version: 1, Settings: map[string]any{"firewallEnabled": true}},
+		},
+		Conflicts:         []contract.Conflict{},
+		EffectiveSettings: map[string]any{"firewallEnabled": true},
+	}
+
+	var checkinBody []byte
+	enforceCalled := false
+
+	transport := &mockTransport{
+		doFunc: func(method, path string, body []byte) (*http.Response, error) {
+			if method == "GET" && strings.Contains(path, "policies") {
+				data, _ := json.Marshal(bundle)
+				return fake.Response(http.StatusOK, string(data)), nil
+			}
+			if method == "POST" && strings.Contains(path, "checkin") {
+				checkinBody = body
+				return fake.Response(http.StatusOK, "{}"), nil
+			}
+			return fake.Response(http.StatusOK, "{}"), nil
+		},
+	}
+
+	stateStore := &fakeStore{state: st}
+
+	deps := &Deps{
+		Client: transport,
+		Store:  stateStore,
+		FS:     fsys,
+		Clock:  clock,
+		GOOS:   "darwin",
+		CollectInventory: func() (contract.Inventory, error) {
+			return inv, nil
+		},
+		CollectPosture: func() (contract.Posture, error) {
+			return pst, nil
+		},
+		// Evaluate left nil, so the production policy.Evaluate runs.
+		Enforce: func(ctx context.Context, effective map[string]any, posture contract.Posture) {
+			enforceCalled = true
+		},
+	}
+
+	// When: one cycle runs with the production evaluator and a recording Enforce
+	err := RunOnce(context.Background(), deps)
+	if err != nil {
+		t.Fatalf("RunOnce failed: %v", err)
+	}
+
+	// Then: the check-in carries violation firewall_disabled and Enforce was called
+	if !enforceCalled {
+		t.Fatal("Expected Enforce to be called")
+	}
+
+	var checkinReq contract.CheckInRequest
+	if err := json.Unmarshal(checkinBody, &checkinReq); err != nil {
+		t.Fatalf("Failed to unmarshal checkin body: %v", err)
+	}
+
+	if len(checkinReq.PolicyCompliance) != 1 {
+		t.Fatalf("Expected 1 policy compliance entry, got %d", len(checkinReq.PolicyCompliance))
+	}
+
+	found := false
+	for _, v := range checkinReq.PolicyCompliance[0].Violations {
+		if v == policy.ViolationFirewallDisabled {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("Expected violation %s, got %v", policy.ViolationFirewallDisabled, checkinReq.PolicyCompliance[0].Violations)
+	}
+}
+
 // fakeStore is a simple mock of the state store.
 type fakeStore struct {
 	state           state.State

@@ -153,6 +153,15 @@ type Deps struct {
 	// else -- a failed update is retried by the next cycle, not by this one.
 	ApplyUpdate func(ctx context.Context, rel contract.AgentRelease) error
 
+	// Enforce, when non-nil, is called once per cycle with the bundle's
+	// effectiveSettings and the posture this cycle collected, after the
+	// bundle has been evaluated and before the check-in is posted. It is the
+	// seam agent/internal/enforce plugs into. It is not called when the
+	// bundle could not be fetched, so a failed fetch changes nothing on the
+	// device. The check-in reports the posture from before enforcement; the
+	// next cycle reports the result.
+	Enforce func(ctx context.Context, effective map[string]any, posture contract.Posture)
+
 	// AfterCheckIn, when non-nil, is called with the decoded check-in
 	// response at the end of a successful cycle. It is the seam the command
 	// executor plugs into: PendingCommandCount is what tells it whether a
@@ -263,6 +272,9 @@ func runCycle(ctx context.Context, deps *Deps) error {
 	}
 	if bundle, ok := deps.fetchBundle(deviceID); ok {
 		req.PolicyCompliance = policy.Entries(deps.evaluate(bundle, pst, deps.Clock.Now()))
+		if deps.Enforce != nil {
+			deps.Enforce(ctx, bundle.EffectiveSettings, pst)
+		}
 	}
 
 	body, err := json.Marshal(req)

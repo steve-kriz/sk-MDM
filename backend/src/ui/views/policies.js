@@ -6,7 +6,7 @@
  *   assignRequest({policyId, groupId})   -> POST /admin/api/v1/policies/{policyId}/assignments {groupId}
  *   unassignRequest({policyId, groupId}) -> DELETE on that same path
  *
- * The settings a policy may carry are a closed set: five keys, each with its
+ * The settings a policy may carry are a closed set: seven keys, each with its
  * own type and range, exactly as `src/admin/policies.ts` enforces them. A key
  * this console does not know is dropped rather than sent, and a value out of
  * range is named in its own field instead of being posted -- a policy an agent
@@ -24,7 +24,24 @@ export const SETTING_KEYS = [
   'screenLockTimeoutSeconds',
   'osUpdateMaxAgeDays',
   'localAdminAllowlist',
+  'firewallBlockedDomains',
+  'firewallAllowedDomains',
 ];
+
+/** The keys whose values are lists typed as text. */
+const LIST_KEYS = ['localAdminAllowlist', 'firewallBlockedDomains', 'firewallAllowedDomains'];
+
+/** The keys whose values are lists of domain names. */
+const DOMAIN_KEYS = ['firewallBlockedDomains', 'firewallAllowedDomains'];
+
+/** What one domain entry must look like, exactly as `src/admin/policies.ts` checks it. */
+export const DOMAIN_PATTERN = /^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
+
+/** Longest accepted domain entry, in characters. */
+export const DOMAIN_MAX_LENGTH = 253;
+
+/** Most entries a domain list may hold. */
+export const DOMAIN_LIST_MAX_ENTRIES = 500;
 
 /** The range `screenLockTimeoutSeconds` must fall inside. */
 export const SCREEN_LOCK_TIMEOUT_SECONDS = { min: 60, max: 3600 };
@@ -57,6 +74,14 @@ function asList(value) {
     .filter((entry) => entry.length > 0);
 }
 
+/** True when a list holds at most 500 entries, each a valid domain name. */
+function isDomainList(list) {
+  return (
+    list.length <= DOMAIN_LIST_MAX_ENTRIES &&
+    list.every((entry) => entry.length <= DOMAIN_MAX_LENGTH && DOMAIN_PATTERN.test(entry))
+  );
+}
+
 /** True when a number is an integer inside a range. */
 function inRange(value, range) {
   return Number.isInteger(value) && value >= range.min && value <= range.max;
@@ -75,7 +100,7 @@ export function settingsOf(state = {}) {
       settings[key] = value === true || value === 'true';
       continue;
     }
-    if (key === 'localAdminAllowlist') {
+    if (LIST_KEYS.includes(key)) {
       const list = asList(value);
       if (list !== null) {
         settings[key] = list;
@@ -96,6 +121,11 @@ export function fieldErrors(state = {}) {
   }
   if (settings.osUpdateMaxAgeDays !== undefined && !inRange(settings.osUpdateMaxAgeDays, OS_UPDATE_MAX_AGE_DAYS)) {
     errors.push('osUpdateMaxAgeDays');
+  }
+  for (const key of DOMAIN_KEYS) {
+    if (settings[key] !== undefined && !isDomainList(settings[key])) {
+      errors.push(key);
+    }
   }
   return errors;
 }
@@ -212,6 +242,24 @@ export function render(state = {}) {
     `<textarea id="local-admins" name="localAdminAllowlist">${escapeHtml(
       (settings.localAdminAllowlist ?? []).join('\n'),
     )}</textarea>`,
+    '<label for="firewall-blocked-domains">firewallBlockedDomains</label>',
+    `<textarea id="firewall-blocked-domains" name="firewallBlockedDomains">${escapeHtml(
+      (settings.firewallBlockedDomains ?? []).join('\n'),
+    )}</textarea>`,
+    errorFor(
+      errors,
+      'firewallBlockedDomains',
+      `firewallBlockedDomains must hold at most ${DOMAIN_LIST_MAX_ENTRIES} domain names such as example.com`,
+    ),
+    '<label for="firewall-allowed-domains">firewallAllowedDomains</label>',
+    `<textarea id="firewall-allowed-domains" name="firewallAllowedDomains">${escapeHtml(
+      (settings.firewallAllowedDomains ?? []).join('\n'),
+    )}</textarea>`,
+    errorFor(
+      errors,
+      'firewallAllowedDomains',
+      `firewallAllowedDomains must hold at most ${DOMAIN_LIST_MAX_ENTRIES} domain names such as example.com`,
+    ),
     `<button type="submit" class="create"${attributes({ disabled: errors.length > 0 })}>Create policy</button>`,
     '</form>',
     '<form class="assign-policy">',

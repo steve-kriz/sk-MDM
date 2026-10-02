@@ -13,7 +13,10 @@
 // A setting this package does not understand is treated as met. The backend
 // (backend/src/admin/policies.ts) also stores screenLockTimeoutSeconds, which
 // no posture probe reports, so a policy that sets only that is compliant here
-// and is enforced by command instead.
+// and is enforced by command instead. The same holds for firewallBlockedDomains
+// and firewallAllowedDomains: agent/internal/enforce writes them into the hosts
+// file, and they are not judged here, so a policy that sets only those is
+// compliant.
 package policy
 
 import (

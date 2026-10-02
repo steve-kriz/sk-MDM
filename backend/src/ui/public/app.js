@@ -276,6 +276,8 @@ async function onSubmit(event) {
           screenLockTimeoutSeconds: fieldValue(form, 'screenLockTimeoutSeconds'),
           osUpdateMaxAgeDays: fieldValue(form, 'osUpdateMaxAgeDays'),
           localAdminAllowlist: fieldValue(form, 'localAdminAllowlist'),
+          firewallBlockedDomains: fieldValue(form, 'firewallBlockedDomains'),
+          firewallAllowedDomains: fieldValue(form, 'firewallAllowedDomains'),
         },
       }),
     );

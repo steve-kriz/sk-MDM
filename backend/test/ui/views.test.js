@@ -428,3 +428,129 @@ test('Unit - policy settings restricted to allowed keys', async (t) => {
   assert.ok(typeof html === 'string');
   // Should render without error for allowed keys
 });
+
+// ============================================================================
+// TASK-029: Firewall and Domain UI Tests
+// ============================================================================
+
+test('Scenario: SETTING_KEYS holds exactly the seven keys', async (t) => {
+  const expectedKeys = [
+    'firewallEnabled',
+    'diskEncryptionRequired',
+    'screenLockTimeoutSeconds',
+    'osUpdateMaxAgeDays',
+    'localAdminAllowlist',
+    'firewallBlockedDomains',
+    'firewallAllowedDomains',
+  ];
+
+  assert.strictEqual(policiesModule.SETTING_KEYS.length, 7);
+  assert.deepStrictEqual(policiesModule.SETTING_KEYS.sort(), expectedKeys.sort());
+});
+
+test('Scenario: render outputs domain textareas', async (t) => {
+  const state = {
+    name: 'Policy',
+    settings: {
+      firewallBlockedDomains: 'blocked.com',
+      firewallAllowedDomains: 'allowed.com',
+    },
+  };
+
+  const html = policiesModule.render(state);
+
+  assert.ok(html.includes('firewall-blocked-domains'));
+  assert.ok(html.includes('firewallBlockedDomains'));
+  assert.ok(html.includes('firewall-allowed-domains'));
+  assert.ok(html.includes('firewallAllowedDomains'));
+});
+
+test('Scenario: settingsOf parses domain lists from comma/space/newline', async (t) => {
+  const state1 = {
+    settings: {
+      firewallBlockedDomains: 'a.com, b.com\nc.com',
+      firewallAllowedDomains: '',
+    },
+  };
+
+  const result1 = policiesModule.settingsOf(state1);
+
+  assert.deepStrictEqual(result1.firewallBlockedDomains, ['a.com', 'b.com', 'c.com']);
+  assert.strictEqual(result1.firewallAllowedDomains, undefined);
+});
+
+test('Scenario: settingsOf omits empty keys', async (t) => {
+  const state = {
+    settings: {
+      firewallBlockedDomains: '',
+      firewallAllowedDomains: undefined,
+    },
+  };
+
+  const result = policiesModule.settingsOf(state);
+
+  assert.strictEqual(result.firewallBlockedDomains, undefined);
+  assert.strictEqual(result.firewallAllowedDomains, undefined);
+});
+
+test('Scenario: fieldErrors includes invalid domain entries', async (t) => {
+  const state1 = {
+    settings: {
+      firewallBlockedDomains: 'http://x.com',
+    },
+  };
+
+  const errors1 = policiesModule.fieldErrors(state1);
+
+  assert.ok(errors1.includes('firewallBlockedDomains'));
+
+  const state2 = {
+    settings: {
+      firewallAllowedDomains: '*.bad',
+    },
+  };
+
+  const errors2 = policiesModule.fieldErrors(state2);
+
+  assert.ok(errors2.includes('firewallAllowedDomains'));
+});
+
+test('Scenario: fieldErrors includes list with >500 entries', async (t) => {
+  const state = {
+    settings: {
+      firewallBlockedDomains: Array(501).fill('a.com').join('\n'),
+    },
+  };
+
+  const errors = policiesModule.fieldErrors(state);
+
+  assert.ok(errors.includes('firewallBlockedDomains'));
+});
+
+test('Scenario: createRequest returns null when fieldErrors present', async (t) => {
+  const state = {
+    name: 'Policy',
+    settings: {
+      firewallBlockedDomains: 'invalid..domain',
+    },
+  };
+
+  const result = policiesModule.createRequest(state);
+
+  assert.strictEqual(result, null);
+});
+
+test('Scenario: render includes field-error element and disabled button on errors', async (t) => {
+  const state = {
+    name: 'Policy',
+    settings: {
+      firewallBlockedDomains: 'invalid',
+    },
+  };
+
+  const html = policiesModule.render(state);
+
+  assert.ok(html.includes('field-error'));
+  assert.ok(html.includes('data-field'));
+  assert.ok(html.includes('disabled'));
+});
