@@ -379,3 +379,179 @@ test('Router - request headers passed to handler', async (t) => {
 
   assert.deepStrictEqual(capturedHeaders, { authorization: 'Bearer token', 'user-agent': 'test' });
 });
+
+// ============================================================================
+// rawBody tests (TASK-013)
+// ============================================================================
+
+test('Router - rawBody is passed through unserialised', async (t) => {
+  const router = createRouter();
+
+  router.add('GET', '/html', () => ({
+    statusCode: 200,
+    headers: { 'content-type': 'text/html' },
+    rawBody: '<html><body>hello</body></html>',
+  }));
+
+  const response = await router.handle({
+    method: 'GET',
+    path: '/html',
+    query: {},
+    headers: {},
+    body: null,
+  });
+
+  assert.strictEqual(response.statusCode, 200);
+  assert.strictEqual(response.body, '<html><body>hello</body></html>');
+  assert.strictEqual(response.headers['content-type'], 'text/html');
+  assert.strictEqual(response.headers['content-type'] === 'application/json', false);
+});
+
+test('Router - rawBody wins when both body and rawBody are present', async (t) => {
+  const router = createRouter();
+
+  router.add('GET', '/test', () => ({
+    statusCode: 200,
+    headers: { 'content-type': 'text/plain' },
+    body: { ignored: true },
+    rawBody: 'raw text',
+  }));
+
+  const response = await router.handle({
+    method: 'GET',
+    path: '/test',
+    query: {},
+    headers: {},
+    body: null,
+  });
+
+  assert.strictEqual(response.body, 'raw text');
+  assert.strictEqual(response.headers['content-type'], 'text/plain');
+});
+
+test('Router - rawBody with no headers uses empty header set', async (t) => {
+  const router = createRouter();
+
+  router.add('GET', '/test', () => ({
+    statusCode: 200,
+    rawBody: '<div>test</div>',
+  }));
+
+  const response = await router.handle({
+    method: 'GET',
+    path: '/test',
+    query: {},
+    headers: {},
+    body: null,
+  });
+
+  assert.strictEqual(response.body, '<div>test</div>');
+  assert.strictEqual(response.headers['content-type'], undefined);
+});
+
+test('Router - JSON body unaffected when rawBody is absent', async (t) => {
+  const router = createRouter();
+
+  router.add('GET', '/json', () => ({
+    statusCode: 200,
+    body: { ok: true },
+  }));
+
+  const response = await router.handle({
+    method: 'GET',
+    path: '/json',
+    query: {},
+    headers: {},
+    body: null,
+  });
+
+  const parsed = JSON.parse(response.body);
+  assert.deepStrictEqual(parsed, { ok: true });
+  assert.strictEqual(response.headers['content-type'], 'application/json');
+});
+
+test('Router - 404 still returns JSON', async (t) => {
+  const router = createRouter();
+
+  const response = await router.handle({
+    method: 'GET',
+    path: '/notfound',
+    query: {},
+    headers: {},
+    body: null,
+  });
+
+  assert.strictEqual(response.statusCode, 404);
+  const parsed = JSON.parse(response.body);
+  assert.deepStrictEqual(parsed, { error: 'not_found' });
+  assert.strictEqual(response.headers['content-type'], 'application/json');
+});
+
+test('Router - 405 still returns JSON', async (t) => {
+  const router = createRouter();
+
+  router.add('POST', '/test', () => ({ statusCode: 201 }));
+
+  const response = await router.handle({
+    method: 'GET',
+    path: '/test',
+    query: {},
+    headers: {},
+    body: null,
+  });
+
+  assert.strictEqual(response.statusCode, 405);
+  const parsed = JSON.parse(response.body);
+  assert.deepStrictEqual(parsed, { error: 'method_not_allowed' });
+  assert.strictEqual(response.headers['content-type'], 'application/json');
+});
+
+test('Router - 500 on thrown handler still returns JSON', async (t) => {
+  const router = createRouter();
+  const originalError = console.error;
+  console.error = () => {};
+
+  router.add('GET', '/throw', () => {
+    throw new Error('test error');
+  });
+
+  const response = await router.handle({
+    method: 'GET',
+    path: '/throw',
+    query: {},
+    headers: {},
+    body: null,
+  });
+
+  console.error = originalError;
+
+  assert.strictEqual(response.statusCode, 500);
+  const parsed = JSON.parse(response.body);
+  assert.deepStrictEqual(parsed, { error: 'internal_error' });
+  assert.strictEqual(response.headers['content-type'], 'application/json');
+});
+
+test('Router - rawBody respects custom headers', async (t) => {
+  const router = createRouter();
+
+  router.add('GET', '/css', () => ({
+    statusCode: 200,
+    headers: {
+      'content-type': 'text/css; charset=utf-8',
+      'x-custom-header': 'value',
+    },
+    rawBody: 'body { color: blue; }',
+  }));
+
+  const response = await router.handle({
+    method: 'GET',
+    path: '/css',
+    query: {},
+    headers: {},
+    body: null,
+  });
+
+  assert.strictEqual(response.body, 'body { color: blue; }');
+  assert.strictEqual(response.headers['content-type'], 'text/css; charset=utf-8');
+  assert.strictEqual(response.headers['x-custom-header'], 'value');
+});

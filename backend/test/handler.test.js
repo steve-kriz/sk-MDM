@@ -376,3 +376,162 @@ test('Handler - response includes all router headers', async (t) => {
   assert.ok(response.statusCode);
   assert.ok(typeof response.body === 'string');
 });
+
+// ============================================================================
+// Content-type handling tests (TASK-013)
+// ============================================================================
+
+test('Handler - rawBody response keeps its own content-type', async (t) => {
+  router.add('GET', '/html', () => ({
+    statusCode: 200,
+    headers: { 'content-type': 'text/html; charset=utf-8' },
+    rawBody: '<html><body>test</body></html>',
+  }));
+
+  const event = {
+    requestContext: {
+      http: {
+        method: 'GET',
+        path: '/html',
+      },
+    },
+    headers: {},
+  };
+
+  const response = await handler(event);
+
+  assert.strictEqual(response.statusCode, 200);
+  assert.strictEqual(response.headers['content-type'], 'text/html; charset=utf-8');
+  assert.strictEqual(response.body, '<html><body>test</body></html>');
+});
+
+test('Handler - JSON body gets application/json content-type', async (t) => {
+  router.add('GET', '/json-test', () => ({
+    statusCode: 200,
+    body: { result: 'ok' },
+  }));
+
+  const event = {
+    requestContext: {
+      http: {
+        method: 'GET',
+        path: '/json-test',
+      },
+    },
+    headers: {},
+  };
+
+  const response = await handler(event);
+
+  assert.strictEqual(response.statusCode, 200);
+  assert.strictEqual(response.headers['content-type'], 'application/json');
+  assert.deepStrictEqual(JSON.parse(response.body), { result: 'ok' });
+});
+
+test('Handler - JSON body with custom header keeps both headers', async (t) => {
+  router.add('GET', '/json-custom', () => ({
+    statusCode: 200,
+    headers: { 'x-custom': 'value' },
+    body: { test: true },
+  }));
+
+  const event = {
+    requestContext: {
+      http: {
+        method: 'GET',
+        path: '/json-custom',
+      },
+    },
+    headers: {},
+  };
+
+  const response = await handler(event);
+
+  assert.strictEqual(response.headers['content-type'], 'application/json');
+  assert.strictEqual(response.headers['x-custom'], 'value');
+});
+
+test('Handler - CSS asset gets text/css content-type', async (t) => {
+  router.add('GET', '/style.css', () => ({
+    statusCode: 200,
+    headers: { 'content-type': 'text/css; charset=utf-8' },
+    rawBody: 'body { margin: 0; }',
+  }));
+
+  const event = {
+    requestContext: {
+      http: {
+        method: 'GET',
+        path: '/style.css',
+      },
+    },
+    headers: {},
+  };
+
+  const response = await handler(event);
+
+  assert.strictEqual(response.headers['content-type'], 'text/css; charset=utf-8');
+});
+
+test('Handler - JavaScript asset gets application/javascript content-type', async (t) => {
+  router.add('GET', '/app.js', () => ({
+    statusCode: 200,
+    headers: { 'content-type': 'application/javascript; charset=utf-8' },
+    rawBody: 'console.log("test");',
+  }));
+
+  const event = {
+    requestContext: {
+      http: {
+        method: 'GET',
+        path: '/app.js',
+      },
+    },
+    headers: {},
+  };
+
+  const response = await handler(event);
+
+  assert.strictEqual(response.headers['content-type'], 'application/javascript; charset=utf-8');
+});
+
+test('Handler - 404 error response has application/json content-type', async (t) => {
+  const event = {
+    requestContext: {
+      http: {
+        method: 'GET',
+        path: '/nonexistent',
+      },
+    },
+    headers: {},
+  };
+
+  const response = await handler(event);
+
+  assert.strictEqual(response.statusCode, 404);
+  assert.strictEqual(response.headers['content-type'], 'application/json');
+  assert.deepStrictEqual(JSON.parse(response.body), { error: 'not_found' });
+});
+
+test('Handler - rawBody response without explicit content-type gets default application/json', async (t) => {
+  router.add('GET', '/text', () => ({
+    statusCode: 200,
+    rawBody: 'plain text',
+  }));
+
+  const event = {
+    requestContext: {
+      http: {
+        method: 'GET',
+        path: '/text',
+      },
+    },
+    headers: {},
+  };
+
+  const response = await handler(event);
+
+  assert.strictEqual(response.body, 'plain text');
+  // When no content-type is specified, the handler adds the default application/json
+  assert.strictEqual(response.headers['content-type'], 'application/json');
+});
