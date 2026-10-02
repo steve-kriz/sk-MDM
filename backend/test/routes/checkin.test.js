@@ -1123,3 +1123,221 @@ test('Unit: Pending commands query uses pagination cursor', async (t) => {
   assert.strictEqual(queryCalls.length, 2, 'Should make two query calls for pagination');
   assert.strictEqual(queryCalls[1].request.cursor, 'next-page', 'Second query should use cursor from first');
 });
+
+// ============================================================================
+// TASK-022: Agent Release Check-in Scenarios
+// ============================================================================
+
+test('Scenario: Check-in advertises an update', async (t) => {
+  // Given the device profile has platform "windows" and agentVersion "1.2.0"
+  // And the check-in body has inventory.os.architecture "x86_64"
+  // And AGENTRELEASE/windows-amd64 holds version 1.3.0
+  const table = new FakeTable();
+  table.seedItem({
+    ...deviceProfile('test-device-id'),
+    deviceId: 'test-device-id',
+    platform: 'windows',
+    agentVersion: '1.2.0',
+  });
+  table.seedItem({
+    ...agentRelease('windows-amd64'),
+    platform: 'windows-amd64',
+    version: '1.3.0',
+    url: 'https://releases.example.com/mdmagent.exe',
+    sha256: 'a'.repeat(64),
+  });
+
+  const handler = createCheckInHandler({
+    table,
+    pepper: randomHex(32),
+    now: () => new Date('2026-10-02T12:00:00Z'),
+    verifyDevice: createFakeVerifier('test-device-id', true),
+  });
+
+  // When the device checks in
+  const result = await handler(createValidCheckInRequest());
+
+  // Then the body keys are exactly checkInIntervalSeconds, pendingCommandCount and agentRelease
+  assert.strictEqual(result.statusCode, 200);
+  const bodyKeys = Object.keys(result.body).sort();
+  assert.deepStrictEqual(bodyKeys, ['agentRelease', 'checkInIntervalSeconds', 'pendingCommandCount']);
+
+  // And agentRelease has version 1.3.0 with the stored url and sha256
+  assert.strictEqual(result.body.agentRelease.version, '1.3.0');
+  assert.strictEqual(result.body.agentRelease.url, 'https://releases.example.com/mdmagent.exe');
+  assert.strictEqual(result.body.agentRelease.sha256, 'a'.repeat(64));
+});
+
+test('Scenario: Posted agent version wins and refreshes the profile', async (t) => {
+  // Given the device profile agentVersion is "1.2.0" and AGENTRELEASE/windows-amd64 holds 1.3.0
+  const table = new FakeTable();
+  table.seedItem({
+    ...deviceProfile('test-device-id'),
+    deviceId: 'test-device-id',
+    platform: 'windows',
+    agentVersion: '1.2.0',
+  });
+  table.seedItem({
+    ...agentRelease('windows-amd64'),
+    version: '1.3.0',
+    url: 'https://releases.example.com/mdmagent.exe',
+    sha256: 'a'.repeat(64),
+  });
+
+  const handler = createCheckInHandler({
+    table,
+    pepper: randomHex(32),
+    now: () => new Date('2026-10-02T12:00:00Z'),
+    verifyDevice: createFakeVerifier('test-device-id', true),
+  });
+
+  // When the device checks in posting agentVersion "1.3.0"
+  const result = await handler(createValidCheckInRequest({
+    agentVersion: '1.3.0',
+  }));
+
+  // Then the body has no agentRelease key
+  assert.strictEqual(result.statusCode, 200);
+  const bodyKeys = Object.keys(result.body).sort();
+  assert.deepStrictEqual(bodyKeys, ['checkInIntervalSeconds', 'pendingCommandCount']);
+
+  // And the device profile agentVersion is "1.3.0"
+  const profileUpdate = table.recordedProfileUpdate();
+  assert(profileUpdate);
+  assert.strictEqual(
+    profileUpdate.fields.ExpressionAttributeValues[':agentVersion'],
+    '1.3.0',
+  );
+});
+
+test('Scenario: No update when versions match', async (t) => {
+  // Given the device profile agentVersion is 1.3.0 and AGENTRELEASE/windows-amd64 holds 1.3.0
+  const table = new FakeTable();
+  table.seedItem({
+    ...deviceProfile('test-device-id'),
+    deviceId: 'test-device-id',
+    platform: 'windows',
+    agentVersion: '1.3.0',
+  });
+  table.seedItem({
+    ...agentRelease('windows-amd64'),
+    version: '1.3.0',
+    url: 'https://releases.example.com/mdmagent.exe',
+    sha256: 'a'.repeat(64),
+  });
+
+  const handler = createCheckInHandler({
+    table,
+    pepper: randomHex(32),
+    now: () => new Date('2026-10-02T12:00:00Z'),
+    verifyDevice: createFakeVerifier('test-device-id', true),
+  });
+
+  // When the device checks in
+  const result = await handler(createValidCheckInRequest());
+
+  // Then the body keys are exactly checkInIntervalSeconds and pendingCommandCount
+  assert.strictEqual(result.statusCode, 200);
+  const bodyKeys = Object.keys(result.body).sort();
+  assert.deepStrictEqual(bodyKeys, ['checkInIntervalSeconds', 'pendingCommandCount']);
+});
+
+test('Scenario: No release stored for the platform', async (t) => {
+  // Given no item exists at AGENTRELEASE/darwin-arm64
+  const table = new FakeTable();
+  table.seedItem({
+    ...deviceProfile('test-device-id'),
+    deviceId: 'test-device-id',
+    platform: 'darwin',
+    agentVersion: '1.2.0',
+  });
+
+  const handler = createCheckInHandler({
+    table,
+    pepper: randomHex(32),
+    now: () => new Date('2026-10-02T12:00:00Z'),
+    verifyDevice: createFakeVerifier('test-device-id', true),
+  });
+
+  // When a darwin arm64 device checks in
+  const result = await handler(createValidCheckInRequest({
+    requestOverride: {
+      params: { deviceId: 'test-device-id' },
+    },
+    inventory: {
+      hardware: {
+        manufacturer: 'Apple',
+        model: 'MacBook Pro',
+        serialNumber: 'FVFX0',
+        cpu: 'Apple M1',
+        ramBytes: 16000000000,
+        diskBytes: 500000000000,
+      },
+      os: {
+        name: 'macOS',
+        version: '14.5',
+        build: '23F79',
+        architecture: 'aarch64',
+      },
+      software: [],
+    },
+  }));
+
+  // Then the body has no agentRelease key
+  assert.strictEqual(result.statusCode, 200);
+  assert.ok(!result.body.agentRelease);
+});
+
+test('Scenario: Unmappable architecture advertises nothing', async (t) => {
+  // Given inventory.os.architecture is "ppc64"
+  const table = new FakeTable();
+  table.seedItem({
+    ...deviceProfile('test-device-id'),
+    deviceId: 'test-device-id',
+    platform: 'windows',
+    agentVersion: '1.2.0',
+  });
+  table.seedItem({
+    ...agentRelease('windows-amd64'),
+    version: '1.3.0',
+    url: 'https://releases.example.com/mdmagent.exe',
+    sha256: 'a'.repeat(64),
+  });
+
+  const handler = createCheckInHandler({
+    table,
+    pepper: randomHex(32),
+    now: () => new Date('2026-10-02T12:00:00Z'),
+    verifyDevice: createFakeVerifier('test-device-id', true),
+  });
+
+  // When the device checks in
+  const result = await handler(createValidCheckInRequest({
+    inventory: {
+      hardware: {
+        manufacturer: 'Dell',
+        model: 'OptiPlex 7090',
+        serialNumber: 'ABC123',
+        cpu: 'Intel Core i7',
+        ramBytes: 16000000000,
+        diskBytes: 500000000000,
+      },
+      os: {
+        name: 'Windows',
+        version: '11',
+        build: '22621',
+        architecture: 'ppc64',
+      },
+      software: [],
+    },
+  }));
+
+  // Then the body has no agentRelease key and no release item was read
+  assert.strictEqual(result.statusCode, 200);
+  assert.ok(!result.body.agentRelease);
+
+  // Verify that the agentRelease was not queried
+  const getCalls = table.calls.filter((c) => c.operation === 'get');
+  const releaseGets = getCalls.filter((c) => c.key?.pk === 'AGENTRELEASE');
+  assert.strictEqual(releaseGets.length, 0, 'Should not attempt to get release for unmappable architecture');
+});
