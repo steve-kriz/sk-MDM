@@ -95,6 +95,23 @@ export async function handler(event: FunctionUrlEvent): Promise<FunctionUrlRespo
 }
 
 export { createRouter } from './http/router.js';
+export {
+  ADMIN_ROLE,
+  CLOCK_SKEW_SECONDS,
+  DEFAULT_CACHE_TTL_SECONDS,
+  SIGNING_ALGORITHM,
+  createTokenVerifier,
+  isVerifyFailure,
+} from './auth/entra.js';
+export type {
+  EpochSecondsClock,
+  JwksDocument,
+  JwksFetcher,
+  TokenClaims,
+  TokenVerifier,
+  TokenVerifierOptions,
+  VerifyFailure,
+} from './auth/entra.js';
 export type {
   RouteHandler,
   RouteRequest,
