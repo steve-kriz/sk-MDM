@@ -304,3 +304,81 @@ script is a thin wrapper, mirroring `publish-installers.sh`.
 5. macOS pkg.
 6. Packaging script.
 7. Admin UI ownership column/filter/detail.
+
+---
+
+## Amendment A (2026-10-09): sign-in brokered by the MDM site, no localhost
+
+The loopback listener (section 1.2) failed in practice: the browser page at
+`http://localhost:47615/signin` did not load. Sign-in is now brokered by the
+MDM site, so the browser only ever talks to `https://<mdm>` and Microsoft.
+**This amendment supersedes 1.2, 1.4, the localhost parts of 2.4, 3 and 4.**
+
+### A.1 Flow
+
+1. The service, unenrolled and with no vault record, creates a sign-in
+   session: random PKCE verifier (S256 challenge) → `POST
+   /api/v1/agent-auth/sessions`. It persists `{sessionId, verifier, expiresAt,
+   signInUrl}` in `signin.json` (owner-only) and writes `signInUrl` alone to
+   the world-readable `signin-url.txt`, both in the agent data directory.
+2. The installer (and the shortcut) run `mdmagent open-signin` as the logged-in
+   user: it waits up to 30 s for `signin-url.txt`, checks the URL is https on
+   the collection URL's host, and opens it in the default browser.
+3. `GET https://<mdm>/agent/signin/<sessionId>` → 302 to Entra authorize with
+   `redirect_uri=https://<mdm>/agent/callback`, `state=<sessionId>`, the stored
+   challenge, `prompt=select_account`.
+4. `GET /agent/callback?code&state` stores the code on the session and shows a
+   branded "Signed in — you can close this tab" page.
+5. The service polls `GET /api/v1/agent-auth/sessions/<sessionId>` every 10 s,
+   receives the code once (the backend deletes the session on that read),
+   redeems it at Entra itself as a public client with the verifier and the
+   returned `redirectUri`, saves the vault record, deletes both signin files and
+   enrolls (section 1.3, unchanged).
+
+The code held by the backend is useless without the verifier, which never
+leaves the device. No client secret anywhere.
+
+### A.2 Backend API contract
+
+All public (no auth). `<host>` is `publicHost(process.env, request host)`, as
+the admin config uses. Entra not configured → `500 not_configured`.
+
+| Route | Answer |
+|---|---|
+| `POST /api/v1/agent-auth/sessions` body `{"codeChallenge": "<43 base64url chars>", "codeChallengeMethod": "S256"}` | `201 {"sessionId": "<64 hex>", "signInUrl": "https://<host>/agent/signin/<sessionId>", "expiresAt": "<ISO>"}`; bad body → `400 invalid_request` |
+| `GET /agent/signin/{sessionId}` | `302` to `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/authorize?client_id&response_type=code&redirect_uri=https://<host>/agent/callback&scope=api://<client>/MDM.Agent offline_access openid profile&state=<sessionId>&code_challenge&code_challenge_method=S256&prompt=select_account`; unknown/expired → `404` HTML page |
+| `GET /agent/callback?code=&state=` | stores code on the session → `200` HTML "Signed in"; `?error=access_denied` → stores `failed/access_denied`, HTML "Sign-in was declined"; other error → `failed/sign_in_failed`; unknown/expired state or missing code → `400` HTML |
+| `GET /api/v1/agent-auth/sessions/{sessionId}` | `200 {"status":"pending"}`; `200 {"status":"complete","code":"…","redirectUri":"https://<host>/agent/callback"}` and the session is deleted; `200 {"status":"failed","error":"access_denied"\|"sign_in_failed"}` and deleted; unknown/expired → `404 {"error":"not_found"}` |
+
+Storage: key `AGENTSIGNIN#<sessionId>` (pk and sk per the table's key
+conventions in `db/keys.ts`), `ttl` = expiry epoch seconds, lifetime 24 h.
+`sessionId` must match `^[0-9a-f]{64}$` before any key is built. The code is
+never logged or audited. HTML pages use the existing security headers and the
+OfficeHQ logo served at `/assets/public/logo.svg`.
+
+### A.3 Agent
+
+- The `127.0.0.1:47615` listener and `mdmagent signin-url` are removed.
+- Unknown/expired session (404) or `failed` → new session. Transport errors →
+  retry at the next 10 s tick.
+- `mdmagent open-signin`: no file after 30 s → prints "no sign-in is pending"
+  and exits 1; otherwise opens the URL (Windows `rundll32
+  url.dll,FileProtocolHandler <url>`, macOS `open <url>`) and exits 0.
+
+### A.4 Installers
+
+- Windows: the exit-dialog checkbox runs `[INSTALLFOLDER]mdmagent.exe
+  open-signin` impersonated, async, no wait. The Start-menu shortcut "Sign in to
+  OfficeHQ MDM" targets `mdmagent.exe` with `open-signin` (replaces the `.url`).
+- macOS: `postinstall` runs `launchctl asuser <uid> sudo -u <user>
+  /usr/local/bin/mdmagent open-signin &` (failure ignored; the port wait goes).
+  The webloc is replaced by `/Applications/OfficeHQ/Sign in to OfficeHQ
+  MDM.command` (`exec /usr/local/bin/mdmagent open-signin`), removed by
+  `uninstall.sh`.
+
+### A.5 Entra
+
+Under **Mobile and desktop applications** add `https://<mdm-host>/agent/callback`
+for each MDM host (e.g. `https://mdm.officehq.cc/agent/callback`) and remove
+`http://localhost`. It must not be under "Web", which would demand a client
+secret at redemption.
