@@ -382,3 +382,58 @@ Under **Mobile and desktop applications** add `https://<mdm-host>/agent/callback
 for each MDM host (e.g. `https://mdm.officehq.cc/agent/callback`) and remove
 `http://localhost`. It must not be under "Web", which would demand a client
 secret at redemption.
+
+---
+
+## Amendment B (2026-10-09): Azure token used once, to mint an enrollment token
+
+The Entra access token is used for exactly one call and is never stored. It
+mints a single-use enrollment token, and the device enrolls through the
+existing enrollment-token path. "Signed-in user" reporting no longer uses an
+Entra token: the agent reports the user logged in to the operating system.
+**Supersedes the bearer-enrollment parts of 1.3 and 2.1, and TASK-031's
+token-based user-session reporting.**
+
+### B.1 Flow
+
+1. Sign-in as in Amendment A, up to the agent redeeming the code. The access
+   token is held in memory only.
+2. Agent → `POST /api/v1/agent-auth/enrollment-token` with
+   `Authorization: Bearer <access token>`, body `{}`.
+3. Agent writes the returned `token` to `enrollmentToken` in `config.json`
+   (one-field rewrite, like `SetCollectionURL`), drops the access token, wakes
+   enrollment, and enrolls via `X-MDM-Enrollment-Token` (unchanged legacy path).
+4. Enroll answered 401/403 with a token-related error
+   (`invalid_enrollment_token`, `enrollment_token_expired`,
+   `enrollment_token_exhausted`) → the agent removes `enrollmentToken` from
+   config, so a new sign-in is needed (the broker creates a session again).
+
+### B.2 Backend contract
+
+| Route | Answer |
+|---|---|
+| `POST /api/v1/agent-auth/enrollment-token` (public route, bearer user token, `MDM.Agent` scope via `createUserTokenVerifier`) | `201 {"tokenId","token","expiresAt"}`; no/blank bearer → `401 user_token_missing`; verifier 503 → `503 jwks_unavailable`; other rejection → `401 invalid_user_token`; Entra not configured → `500 not_configured` |
+| `POST /api/v1/enroll` | enrollment token only (bearer branch removed; an `Authorization` header is ignored). When the token record carries `enrolledBy`, it is copied onto the device profile and `enrolledByUpn` into the audit detail. `ownership` handling unchanged. |
+| `POST /api/v1/devices/{deviceId}/user-session` (device HMAC only, no bearer) body `{"username": "<string ≤256>" \| null}` | `200 {"user":{"username": …}}`; stores `SIGNEDINUSER` as `{deviceId, username, source:"os", reportedAt}`; bad body → `400 invalid_request` with `fields`; device checks as today |
+
+Minted token record: same shape and hashing as the admin route
+(`<16 hex>.<64 hex>`, `tokenHash`), `maxUses: 1`, `useCount: 0`, expiry 1 h,
+`label: "sign-in <upn>"`, `createdBy: "user:<upn or oid>"`,
+`enrolledBy: {oid, upn, name}`. Audited as `enrollment_token.created` with
+`detail.source: "agent-sign-in"`. The token is returned once and never logged.
+
+Admin device detail returns `signedInUser: {username, reportedAt} | null` and
+the console shows "Signed-in user". `GET /api/v1/agent-auth/config` stays.
+
+### B.3 Agent
+
+- Removed: the token vault (`usertoken.bin`/`.json`; the service deletes a
+  leftover file at start), `userauth.Session`, token refresh, the bearer on
+  signed requests, bearer enrollment, `mdmagent logout`.
+- "Sign-in needed" = unenrolled and no `enrollmentToken` in config.
+- `mdmagent login` (device code, run elevated) also just mints an enrollment
+  token and writes it to config.
+- After each successful check-in the agent reports the OS console user:
+  Windows `(Get-CimInstance Win32_ComputerSystem).UserName` (empty → `null`),
+  macOS `stat -f%Su /dev/console` (`root`/`loginwindow`/empty → `null`), via a
+  signed POST to the user-session route. Failures cost one warning line.
