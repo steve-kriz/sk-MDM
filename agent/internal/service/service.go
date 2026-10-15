@@ -202,23 +202,61 @@ func Run(ctx context.Context, hooks Hooks) error {
 	}
 }
 
-// Restart asks the platform's service manager to stop the agent and start it
-// again. It is what a self-update invokes once the new binary is in place, so
-// the build that is running becomes the build that was just installed.
+// ErrRestartRequired is returned once a self-update has put a new binary in
+// place (or a rollback has restored the old one) and the running process must
+// be replaced by it.
 //
-// It is a request, not a sequence this process sees through: the process making
-// it is the one being stopped, so everything after the stop belongs to the
-// service manager. On macOS that is launchd, which is asked to kick the job
-// over; on Windows it is the service control manager, which is asked to stop
-// the service and start it again.
+// The agent never restarts itself: a process that asks its own service manager
+// to stop and start it is killed by the stop before the start can land. It
+// exits instead, and the service manager restarts it onto whatever binary is
+// now on disk — on Windows through the recovery actions EnsureRecovery
+// configures, which fire because the service reports a service-specific exit
+// code; on macOS through the LaunchDaemon's KeepAlive.
+var ErrRestartRequired = errors.New("service: restart required to apply an update")
+
+// ExitRestart is the exit code that asks for a restart: the service-specific
+// exit code the Windows service reports, and the process exit code of a
+// foreground or launchd `mdmagent run`.
+const ExitRestart = 3
+
+// exitFailure is the service-specific exit code of a service that stopped on
+// any other error.
+const exitFailure = 1
+
+// Restart hands the restart of the agent to the platform's service manager. It
+// is what a self-update invokes once the new binary is in place, so the build
+// that is running becomes the build that was just installed.
+//
+// It runs no command. It returns ErrRestartRequired, which travels up through
+// the scheduler and Run to the process exit, where the service manager sees the
+// agent end and starts it again.
 func Restart(ctx context.Context, cfg Config) error {
-	if cfg.Runner == nil {
-		return errors.New("service: no command runner")
+	return ErrRestartRequired
+}
+
+// ExecuteExit is what the Windows service handler returns to the service
+// control manager for the error Run ended with: no error is a clean stop, the
+// restart sentinel is service-specific exit code ExitRestart, and anything else
+// is service-specific exit code 1. A non-zero service-specific code is what
+// makes the recovery actions fire.
+func ExecuteExit(err error) (serviceSpecific bool, code uint32) {
+	switch {
+	case err == nil:
+		return false, 0
+	case errors.Is(err, ErrRestartRequired):
+		return true, ExitRestart
+	default:
+		return true, exitFailure
 	}
-	if cfg.goos() == "windows" {
-		return restartWindows(ctx, cfg)
-	}
-	return restartDarwin(ctx, cfg)
+}
+
+// forwardsToSCM reports whether a state Run reports is passed on to the Windows
+// service control manager. StateStopped is not: x/sys sends the final
+// SERVICE_STOPPED itself once the handler returns, carrying ExecuteExit's exit
+// code, and an earlier STOPPED with exit code 0 would hide that from the
+// recovery actions.
+func forwardsToSCM(state State) bool {
+	return state != StateStopped
 }
 
 // fire runs the hook a request asks for, once. A shutdown with no hook of its

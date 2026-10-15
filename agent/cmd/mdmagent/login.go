@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 
 	"github.com/officehq/sk-mdm/agent/internal/client"
 	"github.com/officehq/sk-mdm/agent/internal/config"
 	"github.com/officehq/sk-mdm/agent/internal/platform"
+	"github.com/officehq/sk-mdm/agent/internal/signin"
 	"github.com/officehq/sk-mdm/agent/internal/state"
 	"github.com/officehq/sk-mdm/agent/internal/userauth"
 )
@@ -21,8 +21,9 @@ import (
 // client and scopes from.
 const agentAuthConfigPath = "/api/v1/agent-auth/config"
 
-// newProtector is what the user token vault is encrypted with.
-var newProtector = func() platform.SecretProtector { return platform.NewSecretProtector() }
+// msgEnrollmentTokenStored is what `mdmagent login` prints once the minted
+// enrollment token is in the config.
+const msgEnrollmentTokenStored = "enrollment token stored; the service will enroll this device"
 
 // agentAuthConfig is the body of GET /api/v1/agent-auth/config.
 type agentAuthConfig struct {
@@ -67,10 +68,12 @@ func signInFailure(ctx context.Context, err error) string {
 
 // runLogin is `mdmagent login`: the OAuth 2.0 device authorization grant.
 //
-// It prints a verification URL and a code, waits for the user to finish in any
-// browser, and stores the resulting tokens in the vault the service reads. A
-// sign-in that fails for any reason leaves an earlier one exactly as it was:
-// the vault is only written once a token has been received.
+// It is run elevated. It prints a verification URL and a code, waits for the
+// user to finish in any browser, spends the access token on minting a
+// single-use enrollment token and writes that token to the config, where the
+// service's next enrollment attempt picks it up. No Entra token is stored. A
+// sign-in or mint that fails for any reason leaves the config exactly as it
+// was.
 func runLogin(fsys platform.FileSystem, goos string, args []string, stdout, stderr io.Writer) int {
 	flags := flag.NewFlagSet("mdmagent login", flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -120,39 +123,19 @@ func runLogin(fsys platform.FileSystem, goos string, args []string, stdout, stde
 		return exitError
 	}
 
-	username := userauth.UsernameFromIDToken(tok.IDToken)
-	vault := userauth.NewVault(fsys, newProtector(), userauth.VaultPath(goos))
-	if err := vault.Save(userauth.Record{
-		AccessToken:  tok.AccessToken,
-		RefreshToken: tok.RefreshToken,
-		ExpiresAt:    clock.Now().Add(time.Duration(tok.ExpiresIn) * time.Second),
-		Username:     username,
-		TenantID:     authCfg.TenantID,
-		ClientID:     authCfg.ClientID,
-		Scopes:       authCfg.Scopes,
-	}); err != nil {
-		fmt.Fprintf(stderr, "could not store sign-in: %v\n", err)
+	// The access token is spent on one request, minting a single-use
+	// enrollment token, and is then dropped; it is never stored.
+	enrollmentToken, err := signin.MintEnrollmentToken(transport, tok.AccessToken)
+	if err != nil {
+		fmt.Fprintf(stderr, "could not get an enrollment token: %v\n", err)
+		return exitError
+	}
+	if err := config.SetEnrollmentToken(fsys, *configPath, enrollmentToken); err != nil {
+		fmt.Fprintf(stderr, "could not store the enrollment token: %v\n", err)
 		return exitError
 	}
 
-	fmt.Fprintf(stdout, "signed in as %s\n", username)
-	return exitOK
-}
-
-// runLogout is `mdmagent logout`: the stored sign-in is deleted. Nobody being
-// signed in already is not an error.
-func runLogout(fsys platform.FileSystem, goos string, args []string, stdout, stderr io.Writer) int {
-	flags := flag.NewFlagSet("mdmagent logout", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	if err := flags.Parse(args); err != nil {
-		return exitError
-	}
-
-	vault := userauth.NewVault(fsys, newProtector(), userauth.VaultPath(goos))
-	if err := vault.Delete(); err != nil {
-		fmt.Fprintf(stderr, "could not remove sign-in: %v\n", err)
-		return exitError
-	}
-	fmt.Fprintln(stdout, "signed out")
+	fmt.Fprintf(stdout, "signed in as %s\n", userauth.UsernameFromIDToken(tok.IDToken))
+	fmt.Fprintln(stdout, msgEnrollmentTokenStored)
 	return exitOK
 }

@@ -8,12 +8,16 @@ info:
 
     Two authentication schemes exist on this API:
 
-    * `POST /api/v1/enroll` is authenticated **only** by the
-      `X-MDM-Enrollment-Token` header carried over TLS. At enroll time the agent
-      has no `deviceId` and no device secret, so the device HMAC scheme cannot
-      be applied and is not declared on that operation. The token is presented
-      as `<tokenId>.<secret>`: `tokenId` locates the stored token record and the
-      full presented string is what the backend hashes for comparison.
+    * `POST /api/v1/enroll` is authenticated by the `X-MDM-Enrollment-Token`
+      header carried over TLS. The token is admin-minted or, after an agent
+      sign-in, minted by `POST /api/v1/agent-auth/enrollment-token` from the
+      signed-in user's Entra token (`Authorization: Bearer`, scope
+      `MDM.Agent`, used for that one call only). At
+      enroll time the agent has no `deviceId` and no device secret, so the
+      device HMAC scheme cannot be applied and is not declared on that
+      operation. The enrollment token is presented as `<tokenId>.<secret>`:
+      `tokenId` locates the stored token record and the full presented string
+      is what the backend hashes for comparison.
     * Every `/api/v1/devices/...` operation is authenticated by the device HMAC
       scheme: `X-MDM-Device-Id`, `X-MDM-Timestamp`, `X-MDM-Nonce` and
       `X-MDM-Signature`, all required. The signature covers the canonical string
@@ -35,14 +39,21 @@ paths:
       operationId: enrollDevice
       summary: Enroll a device and receive its id and HMAC secret
       description: |
-        Authenticated by the enrollment token alone. None of the device HMAC
+        Authenticated by the enrollment token only. None of the device HMAC
         headers apply here: the agent has no device id and no device secret
-        until this call succeeds.
+        until this call succeeds. An `Authorization` header is ignored.
+
+        A token minted by `POST /api/v1/agent-auth/enrollment-token` carries
+        who signed in; the device records it as `enrolledBy` and the audit
+        entry names the user. The optional `ownership` is recorded as sent.
+
+        After enrollment every call is signed with the issued device secret.
       parameters:
         - name: X-MDM-Enrollment-Token
           in: header
           required: true
-          description: Enrollment token presented as `<tokenId>.<secret>`.
+          description: >-
+            Enrollment token presented as `<tokenId>.<secret>`.
           schema:
             type: string
             pattern: '^[0-9a-f]{16}\.[0-9a-f]{64}$'
@@ -59,8 +70,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/EnrollResponse'
+        '400':
+          description: >-
+            `invalid_request`: the body is missing or has bad fields, named in
+            `fields` (including an `ownership` other than `officehq`/`byoc`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '401':
-          description: The enrollment token is missing, malformed, unknown, used or expired.
+          description: >-
+            `invalid_enrollment_token`: no token, or the token is malformed
+            or unknown.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: >-
+            `enrollment_token_revoked`, `enrollment_token_expired` or
+            `enrollment_token_exhausted`.
           content:
             application/json:
               schema:
@@ -120,6 +149,93 @@ paths:
                 $ref: '#/components/schemas/CheckInResponse'
         '401':
           description: The signature, timestamp or nonce failed verification.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/devices/{deviceId}/heartbeat:
+    post:
+      operationId: heartbeat
+      summary: Report one performance sample for the device's heartbeat
+      description: >-
+        Authenticated by the device HMAC scheme. When the device's heartbeat is
+        on the sample is written to CloudWatch Logs (one log stream per device)
+        and the answer carries the frequency; when it is off nothing is written
+        and the answer is `{"heartbeatIntervalSeconds": 0}`.
+      parameters:
+        - name: deviceId
+          in: path
+          required: true
+          description: Device id issued by enrollment.
+          schema:
+            type: string
+        - name: X-MDM-Device-Id
+          in: header
+          required: true
+          description: Device id; must equal the `deviceId` path parameter.
+          schema:
+            type: string
+        - name: X-MDM-Timestamp
+          in: header
+          required: true
+          description: epoch seconds
+          schema:
+            type: integer
+            format: int64
+            description: epoch seconds
+        - name: X-MDM-Nonce
+          in: header
+          required: true
+          description: Single-use random value, replayed requests are rejected.
+          schema:
+            type: string
+        - name: X-MDM-Signature
+          in: header
+          required: true
+          description: '`v1=` followed by 64 lower-case hex characters.'
+          schema:
+            type: string
+            pattern: '^v1=[0-9a-f]{64}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HeartbeatRequest'
+      responses:
+        '200':
+          description: Heartbeat accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HeartbeatResponse'
+        '400':
+          description: '`invalid_request`: `collectedAt` or `performance` is malformed.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: The signature, timestamp or nonce failed verification.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: '`device_mismatch`: the path names another device.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: '`payload_too_large`: the body exceeds 16384 bytes.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503':
+          description: '`heartbeat_not_configured` or `heartbeat_store_unavailable`.'
           content:
             application/json:
               schema:
@@ -342,20 +458,18 @@ paths:
   /api/v1/devices/{deviceId}/user-session:
     post:
       operationId: postUserSession
-      summary: Report the Entra user signed in on this device
+      summary: Report the user logged in to the device's operating system
       description: |
-        Authenticated by the device HMAC scheme **and** the signed-in user's
-        Entra access token in `Authorization: Bearer <token>`. The bearer is not
-        part of the HMAC canonical string. The token must carry the delegated
-        scope `MDM.Agent`. The request body is empty.
+        Authenticated by the device HMAC scheme only; the body is covered by
+        the signature. The agent sends it after each successful check-in:
+        Windows `(Get-CimInstance Win32_ComputerSystem).UserName`, macOS
+        `stat -f%Su /dev/console`; nobody logged in is `null`. The backend
+        stores `{deviceId, username, source: "os", reportedAt}`, replacing
+        the previous report.
 
         Checks run in order and the first failure answers: the device HMAC
-        (its own 401/403/500), then `device_mismatch` (403), then
-        `user_token_missing` (403), then `jwks_unavailable` (503), then
-        `user_token_invalid` (403). A bearer problem never answers 401, which is
-        reserved for the device credential.
-      security:
-        - bearerAuth: []
+        (its own 401/403/500), then `device_mismatch` (403), then the body
+        (`400 invalid_request` with `fields: ["username"]`).
       parameters:
         - name: deviceId
           in: path
@@ -390,13 +504,28 @@ paths:
           schema:
             type: string
             pattern: '^v1=[0-9a-f]{64}$'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserSessionRequest'
       responses:
         '200':
-          description: The user was verified and recorded as signed in on the device.
+          description: The report was recorded.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/UserSessionResponse'
+        '400':
+          description: >-
+            `invalid_request`: the body is not a JSON object whose `username`
+            is a string of at most 256 characters or null; `fields` is
+            `["username"]`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '401':
           description: The device signature, timestamp or nonce failed verification.
           content:
@@ -405,9 +534,8 @@ paths:
                 $ref: '#/components/schemas/Error'
         '403':
           description: |
-            `device_revoked`, `device_mismatch` (the path names another device),
-            `user_token_missing` (no `Authorization: Bearer <token>`) or
-            `user_token_invalid` (the user token failed verification).
+            `device_revoked` or `device_mismatch` (the path names another
+            device).
           content:
             application/json:
               schema:
@@ -418,8 +546,218 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+
+  /api/v1/agent-auth/enrollment-token:
+    post:
+      operationId: mintAgentEnrollmentToken
+      summary: Exchange the signed-in user's Entra token for a single-use enrollment token
+      description: |
+        Public route, called once after the agent redeems the sign-in code.
+        The Entra access token (scope `MDM.Agent`) is used for this call only
+        and never stored. The answer is an enrollment token for
+        `POST /api/v1/enroll`: one use, valid for one hour, carrying who
+        signed in (`enrolledBy`), which the enrolled device records. The
+        request body is `{}` and is not read. The token is returned once and
+        never logged.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+      responses:
+        '201':
+          description: The enrollment token was minted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentEnrollmentTokenResponse'
+        '401':
+          description: >-
+            `user_token_missing`: no `Authorization: Bearer <token>`, or a
+            blank one. `invalid_user_token`: the token failed verification.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: '`not_configured`: `ENTRA_TENANT_ID` or `ENTRA_CLIENT_ID` is not set.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '503':
-          description: '`jwks_unavailable`: the tenant signing keys could not be fetched.'
+          description: '`jwks_unavailable`: the tenant signing keys could not be fetched. Retry later.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/agent-auth/sessions:
+    post:
+      operationId: createAgentSignInSession
+      summary: Start an MDM-brokered browser sign-in for the agent
+      description: |
+        Unauthenticated. The unenrolled agent generates a PKCE verifier, keeps
+        it on the device and sends only its S256 challenge. The backend stores
+        a pending session (key `AGENTSIGNIN#<sessionId>`, lifetime 24 h,
+        DynamoDB `ttl`) and answers the URL the agent opens in the user's
+        browser. `<host>` is `PUBLIC_HOST` when set, otherwise the request's
+        `Host` header.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentSignInSessionRequest'
+      responses:
+        '201':
+          description: The session was created.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSignInSessionCreated'
+        '400':
+          description: '`invalid_request`: the body is not a JSON object, the challenge is not 43 base64url characters, or the method is not exactly `S256`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: '`not_configured`: `ENTRA_TENANT_ID` or `ENTRA_CLIENT_ID` is not set.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/v1/agent-auth/sessions/{sessionId}:
+    get:
+      operationId: getAgentSignInSession
+      summary: Poll an agent sign-in session
+      description: |
+        Unauthenticated; the agent polls every 10 s. Until the browser callback
+        has stored an outcome, answers `pending`. Then it answers `complete`
+        (with the authorization code and the `redirectUri` to redeem it with)
+        or `failed`, and deletes the session on that read, so the code is
+        handed out at most once. The code is useless without the PKCE verifier
+        held by the device. An unknown, malformed, consumed or expired session
+        id answers 404.
+      security: []
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+      responses:
+        '200':
+          description: The session's state.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentSignInSessionStatus'
+        '404':
+          description: '`not_found`: unknown, already consumed or expired.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: '`not_configured`: `ENTRA_TENANT_ID` or `ENTRA_CLIENT_ID` is not set.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /agent/signin/{sessionId}:
+    get:
+      operationId: agentSignInRedirect
+      summary: Browser entry point that redirects to Entra ID sign-in
+      description: |
+        Opened in the user's browser by `mdmagent open-signin`. Answers `302` to
+        `https://login.microsoftonline.com/<tenant>/oauth2/v2.0/authorize` with
+        `client_id`, `response_type=code`,
+        `redirect_uri=https://<host>/agent/callback`,
+        `scope=api://<clientId>/MDM.Agent offline_access openid profile`,
+        `state=<sessionId>`, the stored `code_challenge`,
+        `code_challenge_method=S256` and `prompt=select_account`.
+      security: []
+      parameters:
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[0-9a-f]{64}$'
+      responses:
+        '302':
+          description: Redirect to the Entra authorize endpoint.
+          headers:
+            Location:
+              schema:
+                type: string
+        '404':
+          description: Unknown, completed or expired session (HTML page).
+          content:
+            text/html:
+              schema:
+                type: string
+        '500':
+          description: '`not_configured`.'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /agent/callback:
+    get:
+      operationId: agentSignInCallback
+      summary: Entra ID redirect URI for the agent sign-in
+      description: |
+        Entra redirects the browser here. With `code` and a live pending
+        `state`, the code is stored on the session and a "Signed in" page is
+        shown. `error=access_denied` stores `failed/access_denied` ("Sign-in
+        was declined"); any other `error` stores `failed/sign_in_failed`. The
+        first callback wins: a session that is already complete or failed is
+        never overwritten. Register `https://<mdm-host>/agent/callback` under
+        **Mobile and desktop applications** in Entra (not "Web").
+      security: []
+      parameters:
+        - name: state
+          in: query
+          required: true
+          description: The session id.
+          schema:
+            type: string
+        - name: code
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: error
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Outcome stored (HTML page).
+          content:
+            text/html:
+              schema:
+                type: string
+        '400':
+          description: Unknown, expired or already completed `state`, or no `code` (HTML page).
+          content:
+            text/html:
+              schema:
+                type: string
+        '500':
+          description: '`not_configured`.'
           content:
             application/json:
               schema:
@@ -432,9 +770,9 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: |
-        The signed-in user's Entra ID access token (scope `MDM.Agent`), sent in
-        addition to the device HMAC headers. Required only by
-        `POST /api/v1/devices/{deviceId}/user-session`.
+        The signed-in user's Entra ID access token (scope `MDM.Agent`). Sent
+        only to `POST /api/v1/agent-auth/enrollment-token`, once, to mint a
+        single-use enrollment token.
 
   schemas:
     Error:
@@ -465,6 +803,14 @@ components:
             enrolls again after a re-install.
         agentVersion:
           type: string
+        ownership:
+          type: string
+          enum: [officehq, byoc]
+          default: officehq
+          description: >-
+            Optional. An OfficeHQ device or BYOC (a personal device). Recorded
+            and displayed only. Absent reads as `officehq`; any other value is a
+            400 naming `ownership`.
 
     EnrollResponse:
       type: object
@@ -508,6 +854,20 @@ components:
             diskBytes:
               type: integer
               format: int64
+            systemFamily:
+              type: string
+              description: Optional. Win32_ComputerSystem.SystemFamily.
+            systemSku:
+              type: string
+              description: Optional. Win32_ComputerSystem.SystemSKUNumber.
+            cpuCores:
+              type: integer
+              minimum: 0
+              description: Optional. Physical cores summed over all processors.
+            cpuLogicalProcessors:
+              type: integer
+              minimum: 0
+              description: Optional. Logical processors summed over all processors.
         os:
           type: object
           additionalProperties: false
@@ -520,6 +880,140 @@ components:
             build:
               type: string
             architecture:
+              type: string
+            edition:
+              type: string
+              description: Optional. Windows EditionID, e.g. "Enterprise".
+            displayVersion:
+              type: string
+              description: Optional. Windows feature-update label, e.g. "23H2".
+            ubr:
+              type: integer
+              minimum: 0
+              description: Optional. Windows update build revision, e.g. 4317.
+            installDate:
+              type: string
+              format: date-time
+              description: Optional. ISO-8601 UTC.
+            lastBootAt:
+              type: string
+              format: date-time
+              description: Optional. ISO-8601 UTC.
+            locale:
+              type: string
+              description: Optional. System locale name, e.g. "en-AU".
+        firmware:
+          type: object
+          additionalProperties: false
+          description: Optional. Firmware and platform security. Omitted when not collected.
+          properties:
+            type:
+              type: string
+              enum: [uefi, bios]
+            biosVersion:
+              type: string
+            biosReleaseDate:
+              type: string
+              format: date-time
+              description: ISO-8601 UTC.
+            secureBootEnabled:
+              type: boolean
+              description: Absent on BIOS firmware or when it could not be read.
+            tpmPresent:
+              type: boolean
+            tpmReady:
+              type: boolean
+            tpmVersion:
+              type: string
+              description: TPM specification version, e.g. "2.0".
+        disks:
+          type: array
+          description: Optional. Fixed logical volumes. Omitted when not collected.
+          maxItems: 32
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              deviceId:
+                type: string
+              fileSystem:
+                type: string
+              sizeBytes:
+                type: integer
+                format: int64
+                minimum: 0
+              freeBytes:
+                type: integer
+                format: int64
+                minimum: 0
+        physicalDisks:
+          type: array
+          description: Optional. Physical drives. Omitted when not collected.
+          maxItems: 16
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              model:
+                type: string
+              mediaType:
+                type: string
+                enum: [ssd, hdd, scm, unspecified]
+              sizeBytes:
+                type: integer
+                format: int64
+                minimum: 0
+        network:
+          type: array
+          description: Optional. IP-enabled network adapters. Omitted when not collected.
+          maxItems: 16
+          items:
+            type: object
+            additionalProperties: false
+            properties:
+              description:
+                type: string
+              macAddress:
+                type: string
+              ipv4:
+                type: array
+                maxItems: 16
+                items:
+                  type: string
+              ipv6:
+                type: array
+                maxItems: 16
+                items:
+                  type: string
+              dhcpEnabled:
+                type: boolean
+              dnsServers:
+                type: array
+                maxItems: 16
+                items:
+                  type: string
+              gateways:
+                type: array
+                maxItems: 16
+                items:
+                  type: string
+        join:
+          type: object
+          additionalProperties: false
+          description: Optional. Directory join state. Omitted when not collected.
+          properties:
+            azureAdJoined:
+              type: boolean
+            domainJoined:
+              type: boolean
+            domain:
+              type: string
+              description: Set only when the device is joined to an AD domain.
+            tenantName:
+              type: string
+            tenantId:
+              type: string
+            entraDeviceId:
               type: string
         software:
           type: array
@@ -577,9 +1071,10 @@ components:
               type: boolean
               description: >-
                 True when antivirus is active. On Windows: Microsoft Defender
-                reports itself enabled, or any antivirus product registered with
-                Windows Security Center is active. On macOS: the XProtect bundle
-                is present.
+                reports itself enabled with real-time protection on (Microsoft
+                Defender counts as enabled only when real-time protection is
+                on), or any antivirus product registered with Windows Security
+                Center is active. On macOS: the XProtect bundle is present.
             definitionsAgeDays:
               type: integer
         osUpdate:
@@ -624,6 +1119,14 @@ components:
             The agent build posting this check-in. Omitted by an agent old
             enough not to report it, which is why the backend falls back to the
             version recorded on the device profile.
+        timeZone:
+          type: string
+          maxLength: 64
+          description: >-
+            Optional. The device's IANA time zone name (the machine-wide OS
+            zone). Omitted when the agent could not work it out. A value that
+            is not a string, is empty, is longer than 64 characters or is not
+            a zone the backend recognises is ignored, never refused.
         policyCompliance:
           type: array
           description: Omitted entirely when the agent has nothing to report.
@@ -651,6 +1154,135 @@ components:
             Never affects complianceState.
           items:
             $ref: '#/components/schemas/AntivirusFinding'
+        analytics:
+          $ref: '#/components/schemas/Analytics'
+        antivirusScan:
+          $ref: '#/components/schemas/AntivirusScan'
+        antivirusStatus:
+          $ref: '#/components/schemas/AntivirusStatus'
+        defenderHardening:
+          $ref: '#/components/schemas/DefenderHardening'
+        agentErrors:
+          type: array
+          maxItems: 50
+          description: >-
+            Optional. The warn and error records the agent logged since its
+            last check-in body, repeats collapsed into one entry with a count,
+            at most 50 and at most 32768 bytes encoded. Omitted entirely when
+            there are none. A malformed value or entry is ignored, never
+            refused, and never affects complianceState.
+          items:
+            $ref: '#/components/schemas/AgentError'
+        agentActions:
+          type: array
+          maxItems: 20
+          description: >-
+            Optional. The actions the agent performed on the device since its
+            last check-in body (firewall or antivirus turned on, blocked
+            domains rewritten, an agent update rolled back), at most 20.
+            Omitted entirely when there are none. Each becomes one agent
+            event in the device History. A malformed value or entry is
+            ignored, never refused.
+          items:
+            $ref: '#/components/schemas/AgentAction'
+
+    Analytics:
+      type: object
+      additionalProperties: false
+      required: [boot, performance, crashes]
+      description: >-
+        Endpoint analytics: boot times, a performance sample and application
+        crashes/hangs. Omitted entirely by an agent that does not collect it.
+        When sent, boot, performance and crashes are always present; crashes is
+        an empty array (never absent or null) when there are none. Never affects
+        complianceState, and a malformed block never fails the check-in.
+      properties:
+        boot:
+          $ref: '#/components/schemas/AnalyticsBoot'
+        performance:
+          $ref: '#/components/schemas/AnalyticsPerformance'
+        crashes:
+          type: array
+          maxItems: 50
+          description: >-
+            Application crash/hang events since the previous successful
+            check-in, at most 50. Empty when there are none.
+          items:
+            $ref: '#/components/schemas/AppCrash'
+        warnings:
+          type: array
+          description: Collector problems. Omitted entirely when there are none.
+          items:
+            type: string
+
+    AnalyticsBoot:
+      type: object
+      additionalProperties: false
+      required: [lastBootAt, bootDurationSeconds, uptimeSeconds]
+      description: Every key is always present; null when the OS did not report it.
+      properties:
+        lastBootAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: When the device last booted, ISO-8601 UTC.
+        bootDurationSeconds:
+          type: number
+          nullable: true
+          description: How long the last boot took, in seconds (fractional allowed).
+        uptimeSeconds:
+          type: integer
+          format: int64
+          nullable: true
+          description: Seconds since the last boot.
+
+    AnalyticsPerformance:
+      type: object
+      additionalProperties: false
+      required: [cpuPercent, memoryUsedBytes, memoryTotalBytes, systemDiskFreeBytes, systemDiskTotalBytes]
+      description: Every key is always present; null when the OS did not report it.
+      properties:
+        cpuPercent:
+          type: number
+          nullable: true
+          description: CPU utilisation 0..100, sampled at collection.
+        memoryUsedBytes:
+          type: integer
+          format: int64
+          nullable: true
+        memoryTotalBytes:
+          type: integer
+          format: int64
+          nullable: true
+        systemDiskFreeBytes:
+          type: integer
+          format: int64
+          nullable: true
+          description: Free bytes on the OS/system volume.
+        systemDiskTotalBytes:
+          type: integer
+          format: int64
+          nullable: true
+          description: Total bytes of the OS/system volume.
+
+    AppCrash:
+      type: object
+      additionalProperties: false
+      required: [appName, appVersion, occurredAt, kind]
+      properties:
+        appName:
+          type: string
+          minLength: 1
+        appVersion:
+          type: string
+          nullable: true
+        occurredAt:
+          type: string
+          format: date-time
+          description: ISO-8601 UTC.
+        kind:
+          type: string
+          enum: [crash, hang]
 
     AntivirusFinding:
       type: object
@@ -675,6 +1307,422 @@ components:
             type: string
         remediated:
           type: boolean
+        category:
+          type: string
+          maxLength: 64
+          description: >-
+            Optional. The Defender threat category, e.g. `Trojan`, or
+            `Category <n>` for an unmapped id. Omitted when unknown.
+        status:
+          type: string
+          enum: [unknown, detected, cleaned, quarantined, removed, allowed, blocked, quarantine_failed, remove_failed, allow_failed, abandoned, block_failed]
+          description: Optional. The Defender threat status.
+        action:
+          type: string
+          enum: [unknown, clean, quarantine, remove, allow, user_defined, no_action, block]
+          description: Optional. The Defender cleaning action.
+        active:
+          type: boolean
+          description: >-
+            Optional. Whether the threat is still active. Omitted when the
+            threat record is gone, never sent as false for that.
+        lastStatusChangeAt:
+          type: string
+          format: date-time
+          description: Optional. When the threat status last changed, ISO-8601 UTC.
+        remediatedAt:
+          type: string
+          format: date-time
+          description: Optional. When the threat was remediated, ISO-8601 UTC.
+        processName:
+          type: string
+          maxLength: 260
+          description: Optional. The process involved in the detection.
+        user:
+          type: string
+          maxLength: 256
+          description: Optional. The user the detection ran under.
+
+    AgentError:
+      type: object
+      additionalProperties: false
+      required: [level, component, message, fields, count, firstAt, lastAt]
+      description: >-
+        One distinct warn or error record the agent logged. Records with the
+        same level, component and message are collapsed: count is how many
+        there were, firstAt the first and lastAt the latest, and fields the
+        latest record's fields. Field values whose key looks secret (token,
+        secret, password, authorization, signature, cookie) are "[redacted]".
+      properties:
+        level:
+          type: string
+          enum: [warn, error]
+        component:
+          type: string
+          maxLength: 64
+          description: The agent component that logged the record.
+        message:
+          type: string
+          minLength: 1
+          maxLength: 256
+        fields:
+          type: object
+          maxProperties: 8
+          description: >-
+            The latest record's fields, at most 8, keys at most 64 characters,
+            values at most 256 characters, every value a string.
+          additionalProperties:
+            type: string
+            maxLength: 256
+        count:
+          type: integer
+          minimum: 1
+          maximum: 1000000
+          description: How many records were collapsed into this entry.
+        firstAt:
+          type: string
+          format: date-time
+          description: The first record's timestamp, ISO-8601 UTC.
+        lastAt:
+          type: string
+          format: date-time
+          description: The latest record's timestamp, ISO-8601 UTC.
+
+    AgentAction:
+      type: object
+      additionalProperties: false
+      required: [type, occurredAt, details]
+      description: >-
+        One action the agent performed on the device. The agent sends no
+        summary; the server builds it from type and details.
+      properties:
+        type:
+          type: string
+          enum:
+            - enforce.firewall_enabled
+            - enforce.antivirus_enabled
+            - enforce.domains_updated
+            - agent.update_rolled_back
+        occurredAt:
+          type: string
+          format: date-time
+          description: When the action happened, ISO-8601 UTC to the second.
+        details:
+          type: object
+          maxProperties: 8
+          description: >-
+            Type-specific details, every value a string. Empty for
+            enforce.firewall_enabled and enforce.antivirus_enabled;
+            blockedCount for enforce.domains_updated; installedVersion and
+            runningVersion for agent.update_rolled_back.
+          additionalProperties:
+            type: string
+            maxLength: 256
+
+    DefenderHardening:
+      type: object
+      additionalProperties: false
+      required: [evaluatedAt, items]
+      description: >-
+        What the agent's Defender protections hardener did to each protection
+        a policy requires, in the pass that ran this cycle. Only required items
+        are listed, in fixed order; items is empty when nothing is required.
+        Omitted on macOS and before the hardener has run. Stored for the admin
+        only and never read to compute complianceState: Defender violations
+        arrive in policyCompliance.
+      properties:
+        evaluatedAt:
+          type: string
+          format: date-time
+          description: When the hardener evaluated, ISO-8601 UTC.
+        items:
+          type: array
+          maxItems: 14
+          items:
+            type: object
+            additionalProperties: false
+            required: [item, state]
+            properties:
+              item:
+                type: string
+                enum:
+                  - realTimeMonitoring
+                  - behaviorMonitoring
+                  - ioavProtection
+                  - scriptScanning
+                  - mapsReporting
+                  - submitSamplesConsent
+                  - networkProtection
+                  - controlledFolderAccess
+                  - puaProtection
+                  - smartScreenWindows
+                  - smartScreenEdge
+                  - signatureUpdateInterval
+                  - signatureScheduleDay
+                  - signatureUpdate
+              state:
+                type: string
+                enum: [ok, applied, failed, tamper_blocked, not_applicable, waiting]
+              detail:
+                type: string
+                maxLength: 256
+                description: Optional. A caught error, a fixed reason such as defender_passive, or the next signature update attempt.
+
+    AntivirusStatus:
+      type: object
+      additionalProperties: false
+      required: [product, defenderAvailable, runningMode, protection, versions, signatures, scans, computerState, rebootRequired, securityCenterProducts]
+      description: >-
+        The device antivirus's full status, sent on every check-in whose status
+        probe succeeded and omitted otherwise. Every key is always present; a
+        value the device did not report is null. When defenderAvailable is
+        false every Defender field is null. A malformed value is ignored or
+        stored as null, never refused. Never affects complianceState.
+      properties:
+        product:
+          type: string
+          maxLength: 128
+          description: '`Microsoft Defender` on Windows, `XProtect` on macOS.'
+        defenderAvailable:
+          type: boolean
+          description: Whether Microsoft Defender answered. Always false on macOS.
+        runningMode:
+          type: string
+          maxLength: 64
+          nullable: true
+          description: Defender's AMRunningMode, e.g. `Normal` or `Passive Mode`.
+        protection:
+          $ref: '#/components/schemas/AntivirusProtection'
+        versions:
+          $ref: '#/components/schemas/AntivirusVersions'
+        signatures:
+          $ref: '#/components/schemas/AntivirusSignatures'
+        scans:
+          $ref: '#/components/schemas/AntivirusScans'
+        computerState:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          nullable: true
+          description: >-
+            Defender's ComputerState flags: 0 clean, 1 full scan pending,
+            2 reboot pending, 4 manual steps pending, 8 offline scan pending,
+            16 critical failure pending.
+        rebootRequired:
+          type: boolean
+          nullable: true
+        securityCenterProducts:
+          type: array
+          maxItems: 10
+          description: The antivirus products Windows Security Center lists. Empty when none.
+          items:
+            $ref: '#/components/schemas/SecurityCenterProduct'
+
+    AntivirusProtection:
+      type: object
+      additionalProperties: false
+      required: [amServiceEnabled, antispywareEnabled, antivirusEnabled, behaviorMonitorEnabled, ioavProtectionEnabled, onAccessProtectionEnabled, realTimeProtectionEnabled, nisEnabled, tamperProtected]
+      properties:
+        amServiceEnabled:
+          type: boolean
+          nullable: true
+        antispywareEnabled:
+          type: boolean
+          nullable: true
+        antivirusEnabled:
+          type: boolean
+          nullable: true
+        behaviorMonitorEnabled:
+          type: boolean
+          nullable: true
+        ioavProtectionEnabled:
+          type: boolean
+          nullable: true
+        onAccessProtectionEnabled:
+          type: boolean
+          nullable: true
+        realTimeProtectionEnabled:
+          type: boolean
+          nullable: true
+        nisEnabled:
+          type: boolean
+          nullable: true
+        tamperProtected:
+          type: boolean
+          nullable: true
+
+    AntivirusVersions:
+      type: object
+      additionalProperties: false
+      required: [engine, product, service, nisEngine, antivirusSignature, antispywareSignature, nisSignature, xprotectDefinitions, xprotectRemediator]
+      properties:
+        engine:
+          type: string
+          maxLength: 64
+          nullable: true
+        product:
+          type: string
+          maxLength: 64
+          nullable: true
+        service:
+          type: string
+          maxLength: 64
+          nullable: true
+        nisEngine:
+          type: string
+          maxLength: 64
+          nullable: true
+        antivirusSignature:
+          type: string
+          maxLength: 64
+          nullable: true
+        antispywareSignature:
+          type: string
+          maxLength: 64
+          nullable: true
+        nisSignature:
+          type: string
+          maxLength: 64
+          nullable: true
+        xprotectDefinitions:
+          type: string
+          maxLength: 64
+          nullable: true
+          description: macOS only.
+        xprotectRemediator:
+          type: string
+          maxLength: 64
+          nullable: true
+          description: macOS only.
+
+    AntivirusSignatures:
+      type: object
+      additionalProperties: false
+      required: [antivirusLastUpdatedAt, antivirusAgeDays, antispywareLastUpdatedAt, antispywareAgeDays, nisLastUpdatedAt, nisAgeDays, outOfDate]
+      properties:
+        antivirusLastUpdatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        antivirusAgeDays:
+          type: integer
+          minimum: 0
+          maximum: 36500
+          nullable: true
+        antispywareLastUpdatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        antispywareAgeDays:
+          type: integer
+          minimum: 0
+          maximum: 36500
+          nullable: true
+        nisLastUpdatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        nisAgeDays:
+          type: integer
+          minimum: 0
+          maximum: 36500
+          nullable: true
+        outOfDate:
+          type: boolean
+          nullable: true
+
+    AntivirusScans:
+      type: object
+      additionalProperties: false
+      required: [quickStartedAt, quickEndedAt, quickAgeDays, quickOverdue, fullStartedAt, fullEndedAt, fullAgeDays, fullOverdue, fullRequired]
+      description: The antivirus's own last quick and full scans (not the MDM-scheduled scan).
+      properties:
+        quickStartedAt:
+          type: string
+          format: date-time
+          nullable: true
+        quickEndedAt:
+          type: string
+          format: date-time
+          nullable: true
+        quickAgeDays:
+          type: integer
+          minimum: 0
+          maximum: 36500
+          nullable: true
+        quickOverdue:
+          type: boolean
+          nullable: true
+        fullStartedAt:
+          type: string
+          format: date-time
+          nullable: true
+        fullEndedAt:
+          type: string
+          format: date-time
+          nullable: true
+        fullAgeDays:
+          type: integer
+          minimum: 0
+          maximum: 36500
+          nullable: true
+        fullOverdue:
+          type: boolean
+          nullable: true
+        fullRequired:
+          type: boolean
+          nullable: true
+
+    SecurityCenterProduct:
+      type: object
+      additionalProperties: false
+      required: [name, state, definitionsUpToDate]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 128
+        state:
+          type: string
+          enum: ['on', 'off', snoozed, expired, unknown]
+        definitionsUpToDate:
+          type: boolean
+          nullable: true
+
+    AntivirusScan:
+      type: object
+      additionalProperties: false
+      required: [scanType, result, startedAt, completedAt, threatsFound]
+      description: >-
+        The last scheduled antivirus scan the agent ran, sent on every
+        check-in once one exists. Optional on CheckInRequest: omitted when
+        there is nothing to report. On macOS, while a scan frequency is set,
+        result is `unsupported` with null times. A malformed value is ignored,
+        never refused. Never affects complianceState.
+      properties:
+        scanType:
+          type: string
+          enum: [quick]
+        result:
+          type: string
+          enum: [clean, threats_found, failed, timeout, unsupported]
+        startedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: ISO-8601 UTC, or null when no scan ran.
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: ISO-8601 UTC, or null when no scan ran.
+        threatsFound:
+          type: integer
+          minimum: 0
+        detail:
+          type: string
+          maxLength: 256
+          description: Why a scan failed. Omitted when there is nothing to add.
 
     CheckInResponse:
       type: object
@@ -692,6 +1740,131 @@ components:
           description: Commands waiting to be leased, so the agent can skip an empty poll.
         agentRelease:
           $ref: '#/components/schemas/AgentRelease'
+        analyticsEnabled:
+          type: boolean
+          description: >-
+            Present only as `false`, when an admin has turned the device's
+            analytics collection off; absent when collection is on. The agent
+            then runs no analytics probes and sends no `analytics` key until a
+            response arrives without it.
+        heartbeatIntervalSeconds:
+          type: integer
+          enum: [60, 300, 900, 1800, 3600]
+          description: >-
+            Present only when an admin has turned the device's heartbeat on;
+            absent when the heartbeat is off. The agent then posts one
+            performance sample to POST /api/v1/devices/{deviceId}/heartbeat
+            every this many seconds.
+
+    HeartbeatRequest:
+      type: object
+      additionalProperties: false
+      required: [collectedAt, performance]
+      description: >-
+        One point-in-time performance sample. Never spooled or retried by the
+        agent.
+      properties:
+        collectedAt:
+          type: string
+          format: date-time
+          description: When the agent took the sample, ISO-8601 UTC.
+        performance:
+          $ref: '#/components/schemas/AnalyticsPerformance'
+        network:
+          type: array
+          maxItems: 8
+          items:
+            $ref: '#/components/schemas/HeartbeatNetworkAdapter'
+          description: >-
+            The active physical network adapters' load and packet counts,
+            measured over about one second. Absent when no adapter was sampled
+            (none up, or the `network` probe failed -- see `warnings`) and from
+            agents that predate it.
+        warnings:
+          type: array
+          items:
+            type: string
+          description: Probes that failed while sampling. Absent when none failed.
+
+    HeartbeatNetworkAdapter:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - linkSpeedBitsPerSecond
+        - receiveBitsPerSecond
+        - sendBitsPerSecond
+        - utilizationPercent
+        - packetsReceivedPerSecond
+        - packetsSentPerSecond
+        - receiveErrors
+        - sendErrors
+        - receiveDiscards
+        - sendDiscards
+      description: >-
+        One adapter. Every key is always present; null when the OS did not
+        report it. Rates are per second over the sample window; errors and
+        discards are the OS's cumulative counters.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          description: The adapter's name (Windows) or interface (macOS, e.g. en0).
+        linkSpeedBitsPerSecond:
+          type: integer
+          format: int64
+          nullable: true
+          description: Negotiated link speed. Null when unknown (macOS Wi-Fi).
+        receiveBitsPerSecond:
+          type: integer
+          format: int64
+          nullable: true
+        sendBitsPerSecond:
+          type: integer
+          format: int64
+          nullable: true
+        utilizationPercent:
+          type: number
+          nullable: true
+          description: >-
+            Saturation 0..100: the busier direction over the link speed. Null
+            when the link speed is unknown.
+        packetsReceivedPerSecond:
+          type: number
+          nullable: true
+        packetsSentPerSecond:
+          type: number
+          nullable: true
+        receiveErrors:
+          type: integer
+          format: int64
+          nullable: true
+        sendErrors:
+          type: integer
+          format: int64
+          nullable: true
+        receiveDiscards:
+          type: integer
+          format: int64
+          nullable: true
+          description: Inbound packets dropped (macOS netstat Drop).
+        sendDiscards:
+          type: integer
+          format: int64
+          nullable: true
+          description: Outbound packets discarded. Always null on macOS.
+
+    HeartbeatResponse:
+      type: object
+      additionalProperties: false
+      required: [heartbeatIntervalSeconds]
+      properties:
+        heartbeatIntervalSeconds:
+          type: integer
+          enum: [0, 60, 300, 900, 1800, 3600]
+          description: >-
+            The device's heartbeat frequency in seconds, or `0` when its
+            heartbeat is off (the agent then stops sending heartbeats).
 
     AgentRelease:
       type: object
@@ -835,6 +2008,17 @@ components:
           items:
             type: string
 
+    UserSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [username]
+      properties:
+        username:
+          type: string
+          nullable: true
+          maxLength: 256
+          description: The operating-system console user, or null when nobody is logged in.
+
     UserSessionResponse:
       type: object
       additionalProperties: false
@@ -843,15 +2027,72 @@ components:
         user:
           type: object
           additionalProperties: false
-          required: [oid, upn, name]
+          required: [username]
           properties:
-            oid:
-              type: string
-            upn:
+            username:
               type: string
               nullable: true
-              description: The token's `preferred_username`, or null.
-            name:
-              type: string
-              nullable: true
-              description: The token's `name`, or null.
+
+    AgentEnrollmentTokenResponse:
+      type: object
+      additionalProperties: false
+      required: [tokenId, token, expiresAt]
+      properties:
+        tokenId:
+          type: string
+          pattern: '^[0-9a-f]{16}$'
+        token:
+          type: string
+          pattern: '^[0-9a-f]{16}\.[0-9a-f]{64}$'
+          description: Presented to `POST /api/v1/enroll` in `X-MDM-Enrollment-Token`. Returned once.
+        expiresAt:
+          type: string
+          format: date-time
+          description: One hour after minting.
+
+    AgentSignInSessionRequest:
+      type: object
+      additionalProperties: false
+      required: [codeChallenge, codeChallengeMethod]
+      properties:
+        codeChallenge:
+          type: string
+          pattern: '^[A-Za-z0-9_-]{43}$'
+          description: base64url (unpadded) SHA-256 of the PKCE verifier.
+        codeChallengeMethod:
+          type: string
+          enum: [S256]
+
+    AgentSignInSessionCreated:
+      type: object
+      additionalProperties: false
+      required: [sessionId, signInUrl, expiresAt]
+      properties:
+        sessionId:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        signInUrl:
+          type: string
+          description: '`https://<host>/agent/signin/<sessionId>`.'
+        expiresAt:
+          type: string
+          format: date-time
+
+    AgentSignInSessionStatus:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [pending, complete, failed]
+        code:
+          type: string
+          description: Only when `complete`. The authorization code; redeem it with the device's PKCE verifier.
+        redirectUri:
+          type: string
+          description: Only when `complete`. `https://<host>/agent/callback`, sent again at redemption.
+        error:
+          type: string
+          enum: [access_denied, sign_in_failed]
+          description: Only when `failed`.

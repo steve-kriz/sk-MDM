@@ -1,7 +1,7 @@
 // Package antivirus keeps antivirus switched on where a policy asks for it and
 // collects the threats the device's own antivirus detected.
 //
-// Two things live here:
+// Five things live here:
 //
 //   - The enforcer (NewEnforcer). When the effective setting antivirusEnabled
 //     is true and the posture this cycle collected says no antivirus is
@@ -13,6 +13,21 @@
 //     Microsoft Defender's detections on Windows and the XProtect Remediator
 //     events in the unified log on macOS, bounded so the check-in body stays
 //     small.
+//   - The status collector (CollectStatus). Every cycle it reads the full
+//     antivirus status: Microsoft Defender's protection states, versions,
+//     signature ages and its own last scans plus the products Windows
+//     Security Center lists on Windows, and the XProtect versions and
+//     definition age on macOS. It only reads; it never changes a setting.
+//   - The scanner (NewScanner). When the effective setting
+//     antivirusScanFrequency asks for it and a scan is due, it starts one
+//     Microsoft Defender quick scan in the background on Windows and
+//     persists the result, which every check-in reports.
+//   - The hardener (NewHardener). For the six defender* policy settings it
+//     switches Microsoft Defender's protections on (real-time components,
+//     cloud protection, network protection, Controlled Folder Access, PUA
+//     blocking plus SmartScreen, daily signature updates) on Windows only,
+//     reads each one back and keeps the outcome for the same cycle's
+//     check-in. It never weakens a protection and runs nothing on macOS.
 //
 // Like the rest of agent/internal, this package touches the operating system
 // only through agent/internal/platform: every command goes through
@@ -33,6 +48,19 @@ const (
 	EnforceTimeout = 60 * time.Second
 	// FindingsTimeout is how long a findings probe may take.
 	FindingsTimeout = 30 * time.Second
+	// StatusTimeout is how long a status probe may take.
+	StatusTimeout = 30 * time.Second
+	// ScanTimeout is how long one scheduled Defender scan may take.
+	ScanTimeout = 2 * time.Hour
+	// HardeningTimeout is how long one hardener read or write process may
+	// take.
+	HardeningTimeout = 60 * time.Second
+	// SignatureUpdateTimeout is how long one hardener signature update
+	// process may take.
+	SignatureUpdateTimeout = 300 * time.Second
+	// SignatureUpdateRetryInterval is how long the hardener waits after a
+	// failed signature update before it tries again.
+	SignatureUpdateRetryInterval = 4 * time.Hour
 )
 
 // Bounds on what one check-in carries, so the body stays well under the

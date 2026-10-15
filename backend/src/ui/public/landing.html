@@ -9,13 +9,181 @@
   <body>
     <header class="masthead">
       <h1>SK-MDM</h1>
+      <nav class="masthead-links"><a href="/applications">Applications</a></nav>
     </header>
     <main class="landing">
-      <h2>Install the SK-MDM agent</h2>
+      <h2>Install the OfficeHQ device agent</h2>
+      <p class="lead">
+        Before you install, here is exactly what this software does, what it can see, and what it never
+        touches. The screenshots below come from the console OfficeHQ IT uses, so you can see the
+        same view we do.
+      </p>
+      <p><a class="jump-link" href="#download">Skip to the downloads</a></p>
+
+      <section class="explainer" aria-labelledby="what-it-does">
+        <h3 id="what-it-does">What this software does</h3>
+        <p>
+          The agent is a small background service. A few times an hour it sends OfficeHQ IT a report on
+          your device's details, health and security settings. We use these reports to troubleshoot
+          problems and to keep your device as secure and up to date as possible. If a key protection,
+          such as your antivirus or firewall, has been switched off, the agent can switch it back on.
+        </p>
+      </section>
+
+      <section class="explainer" aria-labelledby="what-we-collect">
+        <h3 id="what-we-collect">What we collect</h3>
+
+        <h4>Device details</h4>
+        <p>
+          The device name, make, model and serial number, the operating system and its version, disks
+          and free space, network adapters (IP and MAC addresses), the signed-in username and the time
+          zone. We also keep a list of installed applications (names and versions only).
+        </p>
+        <figure class="screenshot">
+          <img src="/assets/public/guide-machine-details.png" width="1320" height="672" loading="lazy"
+            alt="A device's profile in the console: device name, platform, operating system and build, last seen time, compliance state, ownership, who enrolled it, the signed-in user, agent version and time zone." />
+          <figcaption>A device's profile in the console. The names shown are sample values.</figcaption>
+        </figure>
+
+        <h4>Security status</h4>
+        <p>
+          Whether disk encryption, the firewall and antivirus are on, whether your antivirus definitions
+          are current, and whether operating system updates are waiting to be installed.
+        </p>
+        <figure class="screenshot">
+          <img src="/assets/public/guide-posture.png" width="1316" height="223" loading="lazy"
+            alt="The posture panel: disk encryption, firewall and antivirus, each reported as enabled." />
+          <figcaption>The security summary: disk encryption, firewall and antivirus.</figcaption>
+        </figure>
+        <figure class="screenshot">
+          <img src="/assets/public/guide-antivirus-status.png" width="1280" height="880" loading="lazy"
+            alt="Antivirus status: Microsoft Defender running in normal mode with no active threats, and each protection, such as real-time protection and behaviour monitoring, shown as on or off." />
+          <figcaption>Antivirus status: which protections are on, and the engine and definition versions.</figcaption>
+        </figure>
+        <figure class="screenshot">
+          <img src="/assets/public/guide-defender-policy.png" width="1298" height="873" loading="lazy"
+            alt="The Defender protection policy table: real-time protection, script scanning, cloud-delivered protection, ransomware protection, SmartScreen and signature updates, each shown as on." />
+          <figcaption>The Microsoft Defender settings OfficeHQ checks on Windows.</figcaption>
+        </figure>
+
+        <h4>Antivirus scans and detections</h4>
+        <p>
+          When your antivirus last scanned and what it found. If it finds a threat, we see the threat's
+          name and where it was found, so IT can help clean it up. We do not see the contents of your
+          files.
+        </p>
+        <figure class="screenshot">
+          <img src="/assets/public/guide-antivirus-findings.png" width="1307" height="407" loading="lazy"
+            alt="Antivirus findings showing none, and the last antivirus scan: a quick scan with a clean result and no threats found." />
+          <figcaption>Antivirus findings and the most recent scan.</figcaption>
+        </figure>
+
+        <h4>Health and performance</h4>
+        <p>
+          When the device last started and how long start-up took, application crashes, and samples of
+          CPU, memory and disk use. When IT is looking into a slow device, we may also take short
+          performance samples every few minutes. These include how busy your network connection is,
+          measured as an amount of traffic only, never where it went or what it contained.
+        </p>
+        <figure class="screenshot">
+          <img src="/assets/public/guide-analytics-history.png" width="1370" height="557" loading="lazy"
+            alt="Analytics history: one row per sample with the time, CPU percentage, memory used, free system disk space, and network load such as Wi-Fi utilisation, traffic in and out, packets per second, errors and discards." />
+          <figcaption>Performance samples. The network column shows amounts of traffic, never websites or content.</figcaption>
+        </figure>
+      </section>
+
+      <section class="explainer reassure" aria-labelledby="never-collect">
+        <h3 id="never-collect">What we never collect</h3>
+        <ul class="never-list">
+          <li>Your browsing history, the websites you visit or what you search for</li>
+          <li>The contents of your files, documents or photos</li>
+          <li>Your emails, messages or chats</li>
+          <li>Your keystrokes or passwords</li>
+          <li>Screenshots or recordings of your screen</li>
+          <li>Your camera or microphone</li>
+        </ul>
+        <p>
+          The agent is not monitoring software. It does not watch what you do; it reports on the
+          device's health and security settings.
+        </p>
+      </section>
+
+      <section class="explainer" aria-labelledby="device-types">
+        <h3 id="device-types">OfficeHQ devices and your own device (BYOD)</h3>
+        <p>
+          When you install, the installer asks whether this is an OfficeHQ device or your own personal
+          device. Your answer changes what OfficeHQ does with it.
+        </p>
+        <figure class="screenshot screenshot-narrow">
+          <img src="/assets/public/guide-installer-device-type.png" width="613" height="486" loading="lazy"
+            alt="The installer's settings step: the collection URL, and a device type choice between OfficeHQ device and BYOC (personal device)." />
+          <figcaption>The installer asks which kind of device this is.</figcaption>
+        </figure>
+        <div class="table-scroll">
+          <table class="grid comparison">
+            <thead>
+              <tr><th scope="col"></th><th scope="col">OfficeHQ device</th><th scope="col">Your own device (BYOD)</th></tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row">Device details, security status and health reports</th><td>Yes</td><td>Yes</td></tr>
+              <tr><th scope="row">Switch the firewall and antivirus back on, and update antivirus definitions</th><td>Yes</td><td>Yes</td></tr>
+              <tr><th scope="row">Approximate location, worked out from your internet connection (about city level), at most once a day</th><td>Yes</td><td>No</td></tr>
+              <tr><th scope="row">Lock the screen after a period of inactivity</th><td>Yes</td><td>No</td></tr>
+              <tr><th scope="row">Install software remotely</th><td>Yes</td><td>No</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note">
+          For your own device, this is OfficeHQ's policy: we do not track its location, lock its screen,
+          or install software on it remotely. You can still install approved applications yourself from
+          the <a href="/applications">Applications</a> page.
+        </p>
+      </section>
+
+      <section class="explainer" aria-labelledby="what-we-change">
+        <h3 id="what-we-change">What we may change on your device</h3>
+        <ul>
+          <li>Switch the firewall back on if it has been turned off. The agent can never turn it off.</li>
+          <li>Switch antivirus real-time protection back on, update its definitions and run scans.</li>
+          <li>Check for operating system updates, so IT can follow up when your device falls behind.</li>
+        </ul>
+        <p>On OfficeHQ devices, IT may also:</p>
+        <ul>
+          <li>lock the screen remotely or after a period of inactivity (you sign back in with your own password)</li>
+          <li>install, update or remove work software</li>
+          <li>restart the device or run maintenance scripts to fix a problem</li>
+          <li>block access to specific websites known to be unsafe</li>
+        </ul>
+      </section>
+
+      <section class="explainer reassure" aria-labelledby="what-we-dont-do">
+        <h3 id="what-we-dont-do">What we don't do</h3>
+        <ul>
+          <li>We never turn your security protections off.</li>
+          <li>We never lock you out of your own files, apps or accounts.</li>
+          <li>We never delete or read your personal files.</li>
+        </ul>
+      </section>
+
+      <section class="explainer" aria-labelledby="why">
+        <h3 id="why">Why we do this</h3>
+        <p>
+          The reports let IT spot a problem, such as a full disk, a crashing app, an antivirus that has
+          stopped, or updates that are waiting, often before you notice it. When you ask for help, we
+          can see what's wrong without taking over your screen. The data is only visible to OfficeHQ IT
+          administrators, who sign in with their work accounts.
+        </p>
+        <p>
+          If you have questions about what is collected, or want the agent removed from your own device,
+          contact OfficeHQ IT.
+        </p>
+      </section>
+
+      <h2 id="download" class="download-heading">Download</h2>
       <p>
-        Download the installer for the device you are setting up, then follow the
-        instructions for its platform. You will need an enrollment token from your
-        administrator.
+        Download the installer for the device you are setting up and run it. The
+        installer asks whether this is an OfficeHQ device or your own (BYOC), then
+        opens your browser so you can sign in with your work account.
       </p>
 
       <section>
@@ -27,12 +195,14 @@
       <section>
         <h3>Windows</h3>
         <ul class="downloads">
-          <li><a href="/downloads/windows-x64">Download for Windows x64 (.msi)</a></li>
-          <li><a href="/downloads/windows-arm64">Download for Windows ARM64 (.msi)</a></li>
+          <li><a href="/downloads/windows-x64">Download for Windows x64 (.msi)</a> <span id="version-windows-x64" class="download-version"></span></li>
+          <li><a href="/downloads/windows-arm64">Download for Windows ARM64 (.msi)</a> <span id="version-windows-arm64" class="download-version"></span></li>
         </ul>
         <p>
-          From an elevated command prompt, run the command below. Replace the
-          placeholders with the path to the downloaded .msi and your enrollment token.
+          Double-click the downloaded .msi and follow the prompts. For a silent
+          install, run the command below from an elevated command prompt; the
+          device's user then signs in from the "Sign in to OfficeHQ MDM" Start menu
+          shortcut.
         </p>
         <pre><code id="windows-install-command" class="copy-field"></code></pre>
       </section>
@@ -40,19 +210,14 @@
       <section>
         <h3>macOS</h3>
         <ul class="downloads">
-          <li><a href="/downloads/macos-amd64">Download for macOS Intel (.pkg)</a></li>
-          <li><a href="/downloads/macos-arm64">Download for macOS Apple silicon (.pkg)</a></li>
+          <li><a href="/downloads/macos-amd64">Download for macOS Intel (.pkg)</a> <span id="version-macos-amd64" class="download-version"></span></li>
+          <li><a href="/downloads/macos-arm64">Download for macOS Apple silicon (.pkg)</a> <span id="version-macos-arm64" class="download-version"></span></li>
         </ul>
         <p>
-          The macOS package already carries the collection URL and enrollment token.
-          In Terminal, run the command below with the path to the downloaded .pkg.
+          Double-click the downloaded .pkg and follow the prompts, or in Terminal run
+          the command below with the path to the downloaded .pkg.
         </p>
         <pre><code id="macos-install-command" class="copy-field">sudo installer -pkg &lt;downloaded .pkg&gt; -target /</code></pre>
-      </section>
-
-      <section>
-        <h3>Administrators</h3>
-        <p><a href="/admin">Open the admin console</a></p>
       </section>
     </main>
     <script type="module" src="/assets/public/landing.js"></script>

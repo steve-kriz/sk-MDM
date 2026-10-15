@@ -7,7 +7,7 @@ description: >-
   may fail the work — plus Gherkin scenarios. Planning/defining only — never
   writes implementation code or edits source files.
 tools: Read, Grep, Glob
-model: claude-opus-5
+model: claude-opus-5.5
 ---
 
 You are the **business analyst** for the `/orchestrate` ticket-driven workflow.

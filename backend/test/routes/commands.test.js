@@ -16,8 +16,13 @@ import {
   DEFAULT_MAX_COMMANDS,
   MAX_MAX_COMMANDS,
   LEASE_CONDITION as LEASE_COND,
+  LEASE_TERMINAL_STATUSES,
+  NO_EXPIRY_WIRE_MILLIS,
+  byRunOrder,
 } from '../../dist/routes/commands.js';
 import { createRouter } from '../../dist/index.js';
+import { createFakeTable } from '../helpers/fakeDynamo.js';
+import { deviceCommand, deviceProfile, commandSettings } from '../../dist/db/keys.js';
 
 /**
  * Fake table client that records operations and condition expressions.
@@ -1155,4 +1160,376 @@ test('Unit: Lazy dependency resolution with function source', async () => {
   });
   assert.strictEqual(response.statusCode, 200);
   assert.strictEqual(callCount, 2);
+});
+
+// ============================================================================
+// TASK-045: Ordered queues -- lease (LS1-LS6) and the on-failure setting
+// (OF3-OF6, backend half). Uses the real createTableClient over an in-memory
+// documentClient (test/helpers/fakeDynamo.js), so conditional updates, the
+// ADD counter and query pagination all run through production code. No real
+// database connection is made.
+// ============================================================================
+
+test('Scenario: LS1 Lease reads every query page', async () => {
+  const { table, documentClient } = createFakeTable();
+  // Force the fake to paginate like a 1 MB DynamoDB response would, without a
+  // multi-megabyte fixture: three terminal items on page one, the pending
+  // item alone on page two.
+  documentClient.pageSize = 3;
+  const now = () => 1000;
+
+  for (let i = 1; i <= 3; i += 1) {
+    await table.put({
+      ...deviceCommand('dev-1', `t${i}`),
+      commandId: `t${i}`,
+      type: 'run_script',
+      status: 'succeeded',
+      issuedAt: 100,
+      expiresAt: 999999999,
+    });
+  }
+  await table.put({
+    ...deviceCommand('dev-1', 'z-pending'),
+    commandId: 'z-pending',
+    type: 'run_script',
+    status: 'pending',
+    issuedAt: 200,
+    expiresAt: 999999999,
+    payload: { interpreter: 'cmd', script: 'echo' },
+  });
+
+  const handler = createLeaseHandler({ table, now, verifyDevice: createFakeVerifier('dev-1') });
+  const response = await handler({
+    method: 'GET',
+    path: '/api/v1/devices/dev-1/commands',
+    params: { deviceId: 'dev-1' },
+    query: { max: '5' },
+    headers: {},
+    body: null,
+  });
+
+  assert.strictEqual(response.statusCode, 200);
+  assert.strictEqual(response.body.commands.length, 1);
+  assert.strictEqual(response.body.commands[0].commandId, 'z-pending');
+
+  const stored = await table.get(deviceCommand('dev-1', 'z-pending'));
+  assert.strictEqual(stored.status, 'leased');
+});
+
+test('Scenario: LS2 Lease order is legacy first, then by seq', async () => {
+  const { table } = createFakeTable();
+  const now = () => 1000;
+
+  await table.put({ ...deviceCommand('dev-1', 'S3'), commandId: 'S3', type: 'run_script', status: 'pending', seq: 3, issuedAt: 50, payload: { interpreter: 'cmd', script: 'a' } });
+  await table.put({ ...deviceCommand('dev-1', 'L1'), commandId: 'L1', type: 'run_script', status: 'pending', issuedAt: 200, payload: { interpreter: 'cmd', script: 'b' } });
+  await table.put({ ...deviceCommand('dev-1', 'S1'), commandId: 'S1', type: 'run_script', status: 'pending', seq: 1, issuedAt: 60, payload: { interpreter: 'cmd', script: 'c' } });
+  await table.put({ ...deviceCommand('dev-1', 'L0'), commandId: 'L0', type: 'run_script', status: 'pending', issuedAt: 100, payload: { interpreter: 'cmd', script: 'd' } });
+
+  const handler = createLeaseHandler({ table, now, verifyDevice: createFakeVerifier('dev-1') });
+  const response = await handler({
+    method: 'GET',
+    path: '/api/v1/devices/dev-1/commands',
+    params: { deviceId: 'dev-1' },
+    query: { max: '3' },
+    headers: {},
+    body: null,
+  });
+
+  assert.strictEqual(response.statusCode, 200);
+  assert.deepStrictEqual(response.body.commands.map((c) => c.commandId), ['L0', 'L1', 'S1']);
+
+  const s3 = await table.get(deviceCommand('dev-1', 'S3'));
+  assert.strictEqual(s3.status, 'pending');
+});
+
+test('Scenario: LS3 An unexpired earlier lease blocks later commands', async () => {
+  const { table } = createFakeTable();
+  const now = () => 1000;
+
+  await table.put({ ...deviceCommand('dev-1', 'L0'), commandId: 'L0', type: 'run_script', status: 'pending', issuedAt: 50, payload: { interpreter: 'cmd', script: 'a' } });
+  await table.put({ ...deviceCommand('dev-1', 'S1'), commandId: 'S1', type: 'run_script', status: 'leased', seq: 1, issuedAt: 60, leaseExpiresAt: 1100, payload: { interpreter: 'cmd', script: 'b' } });
+  await table.put({ ...deviceCommand('dev-1', 'S2'), commandId: 'S2', type: 'run_script', status: 'pending', seq: 2, issuedAt: 70, payload: { interpreter: 'cmd', script: 'c' } });
+
+  const handler = createLeaseHandler({ table, now, verifyDevice: createFakeVerifier('dev-1') });
+  const response = await handler({
+    method: 'GET',
+    path: '/api/v1/devices/dev-1/commands',
+    params: { deviceId: 'dev-1' },
+    query: {},
+    headers: {},
+    body: null,
+  });
+
+  assert.strictEqual(response.statusCode, 200);
+  assert.deepStrictEqual(response.body.commands.map((c) => c.commandId), ['L0']);
+
+  const s2 = await table.get(deviceCommand('dev-1', 'S2'));
+  assert.strictEqual(s2.status, 'pending');
+});
+
+test('Scenario: LS4 Terminal commands are never leased and never block', async () => {
+  const { table } = createFakeTable();
+  const now = () => 1000;
+  const terminal = ['cancelled', 'skipped', 'failed', 'expired', 'succeeded'];
+  for (let i = 0; i < terminal.length; i += 1) {
+    await table.put({
+      ...deviceCommand('dev-1', `c${i + 1}`),
+      commandId: `c${i + 1}`,
+      type: 'run_script',
+      status: terminal[i],
+      seq: i + 1,
+      issuedAt: 10 * (i + 1),
+      payload: { interpreter: 'cmd', script: 'x' },
+    });
+  }
+  await table.put({ ...deviceCommand('dev-1', 'c6'), commandId: 'c6', type: 'run_script', status: 'pending', seq: 6, issuedAt: 70, payload: { interpreter: 'cmd', script: 'y' } });
+
+  const handler = createLeaseHandler({ table, now, verifyDevice: createFakeVerifier('dev-1') });
+  const response = await handler({
+    method: 'GET',
+    path: '/api/v1/devices/dev-1/commands',
+    params: { deviceId: 'dev-1' },
+    query: {},
+    headers: {},
+    body: null,
+  });
+
+  assert.deepStrictEqual(response.body.commands.map((c) => c.commandId), ['c6']);
+});
+
+test('Scenario: LS5 A lapsed lease is re-leased in position', async () => {
+  const { table } = createFakeTable();
+  const now = () => 1000;
+
+  await table.put({ ...deviceCommand('dev-1', 'S1'), commandId: 'S1', type: 'run_script', status: 'leased', seq: 1, issuedAt: 50, leaseExpiresAt: 999, payload: { interpreter: 'cmd', script: 'a' } });
+  await table.put({ ...deviceCommand('dev-1', 'S2'), commandId: 'S2', type: 'run_script', status: 'pending', seq: 2, issuedAt: 60, payload: { interpreter: 'cmd', script: 'b' } });
+
+  const handler = createLeaseHandler({ table, now, verifyDevice: createFakeVerifier('dev-1') });
+  const response = await handler({
+    method: 'GET',
+    path: '/api/v1/devices/dev-1/commands',
+    params: { deviceId: 'dev-1' },
+    query: {},
+    headers: {},
+    body: null,
+  });
+
+  assert.deepStrictEqual(response.body.commands.map((c) => c.commandId), ['S1', 'S2']);
+});
+
+test('Scenario: LS6 Commands without expiry never expire and get a far wire expiry', async () => {
+  const { table } = createFakeTable();
+  const now = () => 1000; // epoch seconds
+
+  // No expiresAt at all: a library command.
+  await table.put({ ...deviceCommand('dev-1', 'S1'), commandId: 'S1', type: 'run_script', status: 'pending', seq: 1, issuedAt: 1000, payload: { interpreter: 'cmd', script: 'a' } });
+  // Legacy command whose expiresAt has already passed.
+  await table.put({ ...deviceCommand('dev-1', 'X'), commandId: 'X', type: 'run_script', status: 'pending', issuedAt: 500, expiresAt: 1, payload: { interpreter: 'cmd', script: 'b' } });
+
+  const handler = createLeaseHandler({ table, now, verifyDevice: createFakeVerifier('dev-1') });
+  const response = await handler({
+    method: 'GET',
+    path: '/api/v1/devices/dev-1/commands',
+    params: { deviceId: 'dev-1' },
+    query: {},
+    headers: {},
+    body: null,
+  });
+
+  assert.deepStrictEqual(response.body.commands.map((c) => c.commandId), ['S1']);
+  assert.strictEqual(response.body.commands[0].expiresAt, 1000 + NO_EXPIRY_WIRE_MILLIS);
+  assert.strictEqual(NO_EXPIRY_WIRE_MILLIS, 315360000000);
+
+  const x = await table.get(deviceCommand('dev-1', 'X'));
+  assert.strictEqual(x.status, 'expired');
+});
+
+test('Scenario: OF3 Stop mode flags sequenced commands at lease', async () => {
+  const { table } = createFakeTable();
+  const now = () => 1000;
+  await table.put({ ...commandSettings(), onFailure: 'stop' });
+  await table.put({ ...deviceCommand('dev-1', 'L0'), commandId: 'L0', type: 'run_script', status: 'pending', issuedAt: 50, payload: { interpreter: 'cmd', script: 'a' } });
+  await table.put({ ...deviceCommand('dev-1', 'S1'), commandId: 'S1', type: 'run_script', status: 'pending', seq: 1, issuedAt: 60, payload: { interpreter: 'cmd', script: 'b' } });
+
+  const handler = createLeaseHandler({ table, now, verifyDevice: createFakeVerifier('dev-1') });
+  const response = await handler({
+    method: 'GET',
+    path: '/api/v1/devices/dev-1/commands',
+    params: { deviceId: 'dev-1' },
+    query: {},
+    headers: {},
+    body: null,
+  });
+
+  const byId = Object.fromEntries(response.body.commands.map((c) => [c.commandId, c]));
+  assert.strictEqual(byId.S1.payload.stopOnFailure, true);
+  assert.strictEqual(byId.L0.payload.stopOnFailure, undefined);
+
+  const storedS1 = await table.get(deviceCommand('dev-1', 'S1'));
+  assert.strictEqual(storedS1.payload.stopOnFailure, true);
+});
+
+test('Scenario: OF3 Continue mode does not flag', async () => {
+  const { table } = createFakeTable();
+  const now = () => 1000;
+  // No CONFIG/COMMANDS item at all: defaults to continue.
+  await table.put({ ...deviceCommand('dev-1', 'S1'), commandId: 'S1', type: 'run_script', status: 'pending', seq: 1, issuedAt: 60, payload: { interpreter: 'cmd', script: 'b' } });
+
+  const handler = createLeaseHandler({ table, now, verifyDevice: createFakeVerifier('dev-1') });
+  const response = await handler({
+    method: 'GET',
+    path: '/api/v1/devices/dev-1/commands',
+    params: { deviceId: 'dev-1' },
+    query: {},
+    headers: {},
+    body: null,
+  });
+
+  for (const c of response.body.commands) {
+    assert.notStrictEqual(c.payload.stopOnFailure, true);
+  }
+});
+
+test('Scenario: OF4 A flagged failure skips later commands', async () => {
+  const { table } = createFakeTable();
+
+  await table.put({ ...deviceCommand('dev-1', 'S0'), commandId: 'S0', type: 'run_script', status: 'succeeded', seq: 0, issuedAt: 10, payload: { interpreter: 'cmd', script: 'z' } });
+  await table.put({ ...deviceCommand('dev-1', 'S1'), commandId: 'S1', type: 'run_script', status: 'leased', seq: 1, issuedAt: 20, leaseExpiresAt: 2000, payload: { interpreter: 'cmd', script: 'a', stopOnFailure: true } });
+  await table.put({ ...deviceCommand('dev-1', 'S2'), commandId: 'S2', type: 'run_script', status: 'leased', seq: 2, issuedAt: 30, leaseExpiresAt: 2000, payload: { interpreter: 'cmd', script: 'b' } });
+  await table.put({ ...deviceCommand('dev-1', 'S3'), commandId: 'S3', type: 'run_script', status: 'pending', seq: 3, issuedAt: 40, payload: { interpreter: 'cmd', script: 'c' } });
+  await table.put({ ...deviceCommand('dev-2', 'T1'), commandId: 'T1', type: 'run_script', status: 'pending', seq: 2, issuedAt: 40, payload: { interpreter: 'cmd', script: 'd' } });
+
+  const resultHandler = createResultHandler({ table, now: () => 1000, verifyDevice: createFakeVerifier('dev-1') });
+  const response = await resultHandler({
+    method: 'POST',
+    path: '/api/v1/devices/dev-1/commands/S1/result',
+    params: { deviceId: 'dev-1', commandId: 'S1' },
+    query: {},
+    headers: {},
+    body: JSON.stringify({ status: 'failed', exitCode: 1, output: 'bad', finishedAt: 1000 }),
+  });
+  assert.strictEqual(response.statusCode, 200);
+
+  const s2 = await table.get(deviceCommand('dev-1', 'S2'));
+  const s3 = await table.get(deviceCommand('dev-1', 'S3'));
+  const s0 = await table.get(deviceCommand('dev-1', 'S0'));
+  const t1 = await table.get(deviceCommand('dev-2', 'T1'));
+  assert.strictEqual(s2.status, 'skipped');
+  assert.strictEqual(s2.skippedBecause, 'S1');
+  assert.strictEqual(s3.status, 'skipped');
+  assert.strictEqual(s3.skippedBecause, 'S1');
+  assert.strictEqual(s0.status, 'succeeded');
+  assert.strictEqual(t1.status, 'pending');
+
+  // The two skipped commands are never offered again.
+  const leaseHandler = createLeaseHandler({ table, now: () => 1000, verifyDevice: createFakeVerifier('dev-1') });
+  const leaseResp = await leaseHandler({
+    method: 'GET',
+    path: '/api/v1/devices/dev-1/commands',
+    params: { deviceId: 'dev-1' },
+    query: {},
+    headers: {},
+    body: null,
+  });
+  const ids = leaseResp.body.commands.map((c) => c.commandId);
+  assert.ok(!ids.includes('S2'));
+  assert.ok(!ids.includes('S3'));
+});
+
+test('Scenario Outline: OF5 Results that do not trigger skipping', async () => {
+  const cases = [
+    { state: 'leased without stopOnFailure', payload: { interpreter: 'cmd', script: 'a' }, status: 'leased', result: 'failed' },
+    { state: 'leased with stopOnFailure', payload: { interpreter: 'cmd', script: 'a', stopOnFailure: true }, status: 'leased', result: 'succeeded' },
+    { state: 'already failed with stopOnFailure (repeat)', payload: { interpreter: 'cmd', script: 'a', stopOnFailure: true }, status: 'failed', result: 'failed' },
+  ];
+  for (const c of cases) {
+    const { table } = createFakeTable();
+    await table.put({ ...deviceCommand('dev-1', 'S1'), commandId: 'S1', type: 'run_script', status: c.status, seq: 1, issuedAt: 10, leaseExpiresAt: 5000, payload: c.payload });
+    await table.put({ ...deviceCommand('dev-1', 'S2'), commandId: 'S2', type: 'run_script', status: 'pending', seq: 2, issuedAt: 20, payload: { interpreter: 'cmd', script: 'b' } });
+
+    const handler = createResultHandler({ table, now: () => 1000, verifyDevice: createFakeVerifier('dev-1') });
+    const response = await handler({
+      method: 'POST',
+      path: '/api/v1/devices/dev-1/commands/S1/result',
+      params: { deviceId: 'dev-1', commandId: 'S1' },
+      query: {},
+      headers: {},
+      body: JSON.stringify({ status: c.result, exitCode: c.result === 'failed' ? 1 : 0, output: 'x', finishedAt: 1000 }),
+    });
+    assert.strictEqual(response.statusCode, 200, c.state);
+
+    const s2 = await table.get(deviceCommand('dev-1', 'S2'));
+    assert.strictEqual(s2.status, 'pending', c.state);
+  }
+});
+
+test('Unit: byRunOrder sorts legacy commands before sequenced ones, by issuedAt then by seq', () => {
+  const items = [
+    { commandId: 'S2', seq: 2, issuedAt: 5 },
+    { commandId: 'L2', issuedAt: 20 },
+    { commandId: 'S1', seq: 1, issuedAt: 999 },
+    { commandId: 'L1', issuedAt: 10 },
+  ];
+  const sorted = [...items].sort(byRunOrder);
+  assert.deepStrictEqual(sorted.map((i) => i.commandId), ['L1', 'L2', 'S1', 'S2']);
+});
+
+test('Unit: LEASE_TERMINAL_STATUSES covers every status the lease must never offer', () => {
+  for (const status of ['succeeded', 'failed', 'expired', 'cancelled', 'skipped']) {
+    assert.ok(LEASE_TERMINAL_STATUSES.includes(status), status);
+  }
+  assert.ok(!LEASE_TERMINAL_STATUSES.includes('pending'));
+  assert.ok(!LEASE_TERMINAL_STATUSES.includes('leased'));
+});
+
+// ============================================================================
+// TASK-049 AC8: an install_application item is leased like a library command
+// ============================================================================
+
+test('Scenario: The install is delivered at the next check-in\'s poll in queue order', async () => {
+  // Given dev-1 has a pending run_script with seq 3 and a pending
+  // install_application with seq 5
+  const table = new FakeTable();
+  const now = () => 1000000; // ms
+  table.setItem('DEVICE#dev-1', 'CMD#run-1', {
+    commandId: 'run-1',
+    type: 'run_script',
+    payload: { interpreter: 'cmd', script: 'ipconfig' },
+    status: 'pending',
+    seq: 3,
+    issuedAt: 500,
+    expiresAt: 500 + NO_EXPIRY_WIRE_MILLIS,
+  });
+  table.setItem('DEVICE#dev-1', 'CMD#install-1', {
+    commandId: 'install-1',
+    type: 'install_application',
+    payload: { applicationId: 'app-1', applicationName: '7-Zip', timeoutSeconds: 3600 },
+    status: 'pending',
+    seq: 5,
+    issuedAt: 600,
+    expiresAt: 600 + NO_EXPIRY_WIRE_MILLIS,
+  });
+
+  const handler = createLeaseHandler({ table, now, verifyDevice: createFakeVerifier('dev-1') });
+
+  // When the device leases its commands
+  const response = await handler({
+    method: 'GET',
+    path: '/api/v1/devices/dev-1/commands',
+    params: { deviceId: 'dev-1' },
+    query: {},
+    headers: {},
+    body: null,
+  });
+
+  // Then the run_script comes before the install_application, whose
+  // expiresAt is issuedAt + NO_EXPIRY_WIRE_MILLIS and payload is unchanged
+  assert.strictEqual(response.statusCode, 200);
+  const body = response.body;
+  assert.strictEqual(body.commands.length, 2);
+  assert.strictEqual(body.commands[0].commandId, 'run-1');
+  assert.strictEqual(body.commands[1].commandId, 'install-1');
+  assert.strictEqual(body.commands[1].type, 'install_application');
+  assert.deepStrictEqual(body.commands[1].payload, { applicationId: 'app-1', applicationName: '7-Zip', timeoutSeconds: 3600 });
+  assert.strictEqual(body.commands[1].expiresAt, 600 + NO_EXPIRY_WIRE_MILLIS);
 });

@@ -135,13 +135,6 @@ func uninstallDarwin(ctx context.Context, cfg Config) error {
 	return cfg.FS.Remove(path)
 }
 
-// restartDarwin asks launchd to kick the daemon over: `kickstart -k` kills the
-// running job and starts it again, which is one request rather than a bootout
-// and a bootstrap this process would not survive to make.
-func restartDarwin(ctx context.Context, cfg Config) error {
-	return runLaunchctl(ctx, cfg, "kickstart", "-k", Domain+"/"+cfg.label())
-}
-
 // runLaunchctl runs one launchctl subcommand and turns a non-zero exit into an
 // error naming what failed.
 func runLaunchctl(ctx context.Context, cfg Config, args ...string) error {

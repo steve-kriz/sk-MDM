@@ -8,7 +8,7 @@ description: >-
   the stated Acceptance Criteria, and does it break something — capped at 3
   force-ranked findings, with zero a normal outcome.
 tools: Read, Grep, Glob, Write, Edit, Bash
-model: claude-haiku-4-5
+model: claude-sonet-5.5
 ---
 
 You are the **tester** for the `/orchestrate` ticket-driven workflow.

@@ -85,3 +85,43 @@ export function createUserTokenVerifier({
 
   return { verify };
 }
+
+/** The delegated scope the Applications page's sign-in asks for. */
+export const APP_USER_SCOPE_NAME = 'MDM.User';
+
+/**
+ * The verifier for a user signed in on the Applications page (`/applications`).
+ *
+ * The same JWT core checks as every other verifier, then: the space-separated
+ * `scp` must hold the exact element `MDM.User` (403 `missing_scope` otherwise,
+ * including a token carrying only `MDM.Admin`), `tid` must equal the configured
+ * tenant and `oid` must be non-empty (401 `invalid_subject` otherwise). No role
+ * or group is required.
+ */
+export function createAppUserTokenVerifier({
+  tenantId,
+  clientId,
+  jwksFetcher,
+  now,
+  cacheTtlSeconds = DEFAULT_CACHE_TTL_SECONDS,
+}: UserTokenVerifierOptions): UserTokenVerifier {
+  const core = createJwtCore({ tenantId, clientId, jwksFetcher, now, cacheTtlSeconds });
+
+  async function verify(token: string): Promise<TokenClaims> {
+    const claims = await core.verify(token);
+
+    if (!hasScope(claims.scp, APP_USER_SCOPE_NAME)) {
+      throw failure(403, MISSING_SCOPE);
+    }
+    if (claims.tid !== tenantId) {
+      throw failure(401, INVALID_SUBJECT);
+    }
+    if (typeof claims.oid !== 'string' || claims.oid.length === 0) {
+      throw failure(401, INVALID_SUBJECT);
+    }
+
+    return claims;
+  }
+
+  return { verify };
+}

@@ -46,7 +46,15 @@ func (h *handler) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- svc.S
 
 	hooks := h.hooks
 	hooks.Requests = requests
-	hooks.Report = func(state State) { s <- status(state) }
+	hooks.Report = func(state State) {
+		// The final SERVICE_STOPPED is x/sys's, sent after Execute returns
+		// with ExecuteExit's code; forwarding Run's StateStopped would
+		// report a stop with exit code 0 ahead of it.
+		if !forwardsToSCM(state) {
+			return
+		}
+		s <- status(state)
+	}
 
 	done := make(chan error, 1)
 	go func() { done <- Run(h.ctx, hooks) }()
@@ -54,10 +62,7 @@ func (h *handler) Execute(_ []string, r <-chan svc.ChangeRequest, s chan<- svc.S
 	for {
 		select {
 		case err := <-done:
-			if err != nil {
-				return true, 1
-			}
-			return false, 0
+			return ExecuteExit(err)
 		case change := <-r:
 			switch change.Cmd {
 			case svc.Stop:

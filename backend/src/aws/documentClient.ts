@@ -20,6 +20,8 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  ScanCommand,
+  TransactWriteCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import type { DocumentClient, DocumentCommand, DocumentOperation, DocumentResult } from '../db/table.js';
@@ -37,7 +39,10 @@ const COMMANDS: Readonly<Record<DocumentOperation, CommandFactory>> = {
   Put: (input) => new PutCommand(input as unknown as ConstructorParameters<typeof PutCommand>[0]),
   Update: (input) => new UpdateCommand(input as unknown as ConstructorParameters<typeof UpdateCommand>[0]),
   Query: (input) => new QueryCommand(input as unknown as ConstructorParameters<typeof QueryCommand>[0]),
+  Scan: (input) => new ScanCommand(input as unknown as ConstructorParameters<typeof ScanCommand>[0]),
   Delete: (input) => new DeleteCommand(input as unknown as ConstructorParameters<typeof DeleteCommand>[0]),
+  TransactWrite: (input) =>
+    new TransactWriteCommand(input as unknown as ConstructorParameters<typeof TransactWriteCommand>[0]),
 };
 
 /** Build the production document client. Undefined attribute values are dropped, not rejected. */

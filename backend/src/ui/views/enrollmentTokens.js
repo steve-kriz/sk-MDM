@@ -4,6 +4,10 @@
  *   render({items, created})
  *   createRequest({label, maxUses, expiresAt}) -> POST /admin/api/v1/enrollment-tokens
  *
+ * The list comes from GET /admin/api/v1/enrollment-tokens. Each row that is not
+ * revoked carries a one-click `.revoke-token` button (app.js sends the revoke);
+ * each enrolled device id links to its device page.
+ *
  * The API returns the full token in the creation response and nowhere else --
  * only its hash is stored -- so this screen is the one and only chance an
  * operator has to copy it. It is rendered once, in a copy field, under the text
@@ -13,7 +17,20 @@
 import { cell, escapeHtml, join } from '../public/html.js';
 
 /** The columns a stored token record shows, in order. */
-export const COLUMNS = ['tokenId', 'label', 'maxUses', 'useCount', 'expiresAt'];
+export const COLUMNS = [
+  'tokenId',
+  'label',
+  'createdBy',
+  'createdAt',
+  'maxUses',
+  'useCount',
+  'expiresAt',
+  'status',
+  'deviceIds',
+];
+
+/** The status a revoked token is listed with; such a row offers no Revoke. */
+export const REVOKED_STATUS = 'revoked';
 
 /** The warning the freshly minted token is shown under. */
 export const ONCE_MESSAGE = 'This token is shown once';
@@ -53,10 +70,28 @@ export function shownToken(state = {}) {
   return typeof token === 'string' && token.length > 0 ? token : null;
 }
 
-/** One stored token record. */
+/** The devices a token enrolled, each a link to its device page. */
+function deviceLinks(deviceIds) {
+  const ids = Array.isArray(deviceIds) ? deviceIds.filter((id) => typeof id === 'string' && id.length > 0) : [];
+  if (ids.length === 0) {
+    return '&mdash;';
+  }
+  return ids.map((id) => `<a href="#/devices/${escapeHtml(id)}">${escapeHtml(id)}</a>`).join(' ');
+}
+
+/** One column's cell content for a stored token record. */
+function columnCell(item, column) {
+  return column === 'deviceIds' ? deviceLinks(item.deviceIds) : cell(item[column]);
+}
+
+/** One stored token record, with a Revoke button unless it is already revoked. */
 function row(item) {
-  const cells = COLUMNS.map((column) => `<td class="col-${column}">${cell(item[column])}</td>`).join('');
-  return `<tr class="token" data-token-id="${escapeHtml(item.tokenId)}">${cells}</tr>`;
+  const cells = COLUMNS.map((column) => `<td class="col-${column}">${columnCell(item, column)}</td>`).join('');
+  const action =
+    item.status === REVOKED_STATUS
+      ? ''
+      : `<button type="button" class="revoke-token" data-token-id="${escapeHtml(item.tokenId)}">Revoke</button>`;
+  return `<tr class="token" data-token-id="${escapeHtml(item.tokenId)}">${cells}<td class="col-actions">${action}</td></tr>`;
 }
 
 /** The enrollment tokens screen. */
@@ -80,7 +115,7 @@ export function render(state = {}) {
       ? `<p class="empty">${EMPTY_MESSAGE}</p>`
       : [
           '<table class="grid tokens">',
-          `<thead><tr>${COLUMNS.map((column) => `<th>${column}</th>`).join('')}</tr></thead>`,
+          `<thead><tr>${COLUMNS.map((column) => `<th>${column}</th>`).join('')}<th></th></tr></thead>`,
           `<tbody>${items.map(row).join('')}</tbody>`,
           '</table>',
         ].join('');

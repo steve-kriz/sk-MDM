@@ -13,6 +13,10 @@
  *     ExpressionAttributeNames: { '#p': 'gsi1pk' }, ExpressionAttributeValues: { ':p': 'DEVICE' },
  *     limit: 25, cursor });
  *
+ * `scan` pages through the whole table with the same `limit`/`cursor` shape as
+ * `query`. It is for maintenance only (see `POST /admin/api/v1/policies/reindex`
+ * in `src/admin/policies.ts`); request paths always list through a query.
+ *
  * Everything other than `TableName`, `Key`/`Item` and the pagination fields is
  * passed straight through, so callers write ordinary DynamoDB expressions.
  * Errors from the client propagate unchanged, with one exception: a losing
@@ -27,7 +31,7 @@ export type Item = Record<string, unknown>;
 export type RequestFields = Record<string, unknown>;
 
 /** The document operations this wrapper issues. */
-export type DocumentOperation = 'Get' | 'Put' | 'Update' | 'Query' | 'Delete';
+export type DocumentOperation = 'Get' | 'Put' | 'Update' | 'Query' | 'Scan' | 'Delete' | 'TransactWrite';
 
 /**
  * One request handed to the injected client. Shaped like an AWS SDK v3
@@ -38,6 +42,18 @@ export type DocumentOperation = 'Get' | 'Put' | 'Update' | 'Query' | 'Delete';
 export interface DocumentCommand {
   readonly operation: DocumentOperation;
   readonly input: RequestFields;
+}
+
+/**
+ * One write inside a `transactWrite`: exactly one of `Put`, `Update`,
+ * `Delete` or `ConditionCheck`, each an ordinary DynamoDB request body
+ * without `TableName` (the client stamps it onto each item).
+ */
+export interface TransactWriteItem {
+  Put?: RequestFields;
+  Update?: RequestFields;
+  Delete?: RequestFields;
+  ConditionCheck?: RequestFields;
 }
 
 /** The parts of a DynamoDB response this wrapper reads. */
@@ -74,6 +90,21 @@ export interface QueryRequest extends RequestFields {
   cursor?: string | null;
 }
 
+/**
+ * A scan request: ordinary DynamoDB fields (a `FilterExpression` and its
+ * names/values) plus the same opaque pagination as a query.
+ *
+ * `limit` caps the items *read* in one page, before the filter applies, so a
+ * filtered page may be empty while `cursor` is not `null`: a caller that wants
+ * every match follows the cursor to the end.
+ */
+export interface ScanRequest extends RequestFields {
+  /** Maximum number of items read for the page. */
+  limit?: number;
+  /** Cursor returned by a previous `scan`, or `null`/`undefined` for the first page. */
+  cursor?: string | null;
+}
+
 /** One page of query results. `cursor` is `null` when the page is the last. */
 export interface QueryPage {
   items: Item[];
@@ -91,8 +122,19 @@ export interface TableClient {
   update(key: TableKey, fields?: RequestFields): Promise<Item | undefined>;
   /** Run a query and return one page plus the cursor for the next. */
   query(request?: QueryRequest): Promise<QueryPage>;
+  /**
+   * Read one page of the whole table and the cursor for the next. Reserved for
+   * maintenance (re-indexing records written before an index existed); a
+   * request path lists through a `gsi1` query instead.
+   */
+  scan(request?: ScanRequest): Promise<QueryPage>;
   /** Remove one item. Deleting a missing item is not an error in DynamoDB. */
   delete(key: TableKey, fields?: RequestFields): Promise<void>;
+  /**
+   * Apply every write atomically, or none. Resolves `{written:false}` when the
+   * transaction was cancelled (a condition failed or a concurrent write won).
+   */
+  transactWrite(items: TransactWriteItem[]): Promise<WriteOutcome>;
 }
 
 /** The condition that makes a put succeed only when the key is free. */
@@ -100,6 +142,9 @@ export const PUT_IF_ABSENT_CONDITION = 'attribute_not_exists(pk)';
 
 /** The error name DynamoDB rejects a failed `ConditionExpression` with. */
 export const CONDITIONAL_CHECK_FAILED = 'ConditionalCheckFailedException';
+
+/** The error name DynamoDB rejects a cancelled transaction with. */
+export const TRANSACTION_CANCELED = 'TransactionCanceledException';
 
 /** Encode a `LastEvaluatedKey` as the opaque cursor handed back to callers. */
 export function encodeCursor(lastEvaluatedKey: Item): string {
@@ -134,6 +179,19 @@ function isConditionalCheckFailure(error: unknown): boolean {
     error !== null &&
     (error as { name?: unknown }).name === CONDITIONAL_CHECK_FAILED
   );
+}
+
+/**
+ * True when a thrown value is a cancelled transaction: DynamoDB's
+ * `TransactionCanceledException` (a condition failed, or a concurrent write
+ * conflicted), or a plain failed-condition rejection.
+ */
+export function isTransactionConditionFailure(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) {
+    return false;
+  }
+  const name = (error as { name?: unknown }).name;
+  return name === TRANSACTION_CANCELED || name === CONDITIONAL_CHECK_FAILED;
 }
 
 export function createTableClient({ documentClient, tableName }: TableClientOptions): TableClient {
@@ -171,7 +229,11 @@ export function createTableClient({ documentClient, tableName }: TableClientOpti
     return result.Attributes;
   }
 
-  async function query(request: QueryRequest = {}): Promise<QueryPage> {
+  /**
+   * Send a paged read -- a `Query` or a `Scan` -- turning `limit`/`cursor` into
+   * `Limit`/`ExclusiveStartKey` and the `LastEvaluatedKey` back into a cursor.
+   */
+  async function page(operation: 'Query' | 'Scan', request: QueryRequest | ScanRequest): Promise<QueryPage> {
     const { limit, cursor, ...fields } = request;
     const input: RequestFields = { ...fields };
     if (limit !== undefined) {
@@ -180,7 +242,7 @@ export function createTableClient({ documentClient, tableName }: TableClientOpti
     if (cursor !== undefined && cursor !== null) {
       input.ExclusiveStartKey = decodeCursor(cursor);
     }
-    const result = await send('Query', input);
+    const result = await send(operation, input);
     const lastEvaluatedKey = result.LastEvaluatedKey;
     return {
       items: result.Items ?? [],
@@ -188,9 +250,40 @@ export function createTableClient({ documentClient, tableName }: TableClientOpti
     };
   }
 
+  async function query(request: QueryRequest = {}): Promise<QueryPage> {
+    return page('Query', request);
+  }
+
+  async function scan(request: ScanRequest = {}): Promise<QueryPage> {
+    return page('Scan', request);
+  }
+
   async function remove(key: TableKey, fields: RequestFields = {}): Promise<void> {
     await send('Delete', { ...fields, Key: key });
   }
 
-  return { get, put, putIfAbsent, update, query, delete: remove };
+  async function transactWrite(items: TransactWriteItem[]): Promise<WriteOutcome> {
+    // `TableName` lives on each write inside `TransactItems`, never on the
+    // request itself, so this is the one operation that bypasses `send`.
+    const TransactItems = items.map((item) => {
+      const stamped: Record<string, RequestFields> = {};
+      for (const [kind, body] of Object.entries(item)) {
+        if (body !== undefined) {
+          stamped[kind] = { ...(body as RequestFields), TableName: tableName };
+        }
+      }
+      return stamped;
+    });
+    try {
+      await documentClient.send({ operation: 'TransactWrite', input: { TransactItems } });
+    } catch (error) {
+      if (isTransactionConditionFailure(error)) {
+        return { written: false };
+      }
+      throw error;
+    }
+    return { written: true };
+  }
+
+  return { get, put, putIfAbsent, update, query, scan, delete: remove, transactWrite };
 }

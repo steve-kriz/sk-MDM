@@ -12,6 +12,8 @@ import {
   devicePosture,
   deviceCommand,
   deviceAntivirusFinding,
+  deviceAntivirusScan,
+  deviceAntivirusStatus,
   deviceByHardware,
   group,
   groupMember,
@@ -23,10 +25,48 @@ import {
   deviceListIndex,
   groupIndex,
   agentRelease,
+  deviceAnalytics,
+  analyticsListIndex,
+  deviceBootHistory,
+  deviceAppCrash,
+  appCrashListIndex,
+  inventoryListIndex,
+  APP_CRASH_SK_PREFIX,
   AGENT_RELEASE_PLATFORMS,
   KEY_SEPARATOR,
   GSI1_NAME,
+  application,
+  applicationListIndex,
 } from '../../dist/db/keys.js';
+
+// ============================================================================
+// TASK-049 (AC1): application() and applicationListIndex()
+// ============================================================================
+
+test('Scenario: Application keys -- application() and applicationListIndex() build the documented shape', () => {
+  // When I call application("app-0123456789abcdef") and applicationListIndex("7-Zip")
+  const key = application('app-0123456789abcdef');
+  const index = applicationListIndex('7-Zip');
+
+  // Then they return {pk, sk} and {gsi1pk, gsi1sk} as documented
+  assert.deepStrictEqual(key, { pk: 'APPLICATION#app-0123456789abcdef', sk: 'PROFILE' });
+  assert.deepStrictEqual(index, { gsi1pk: 'APPLICATION', gsi1sk: '7-Zip' });
+});
+
+test('Scenario (failure): An invalid application id cannot form a key -- empty id throws', () => {
+  // When I call application("")
+  // Then an Error is thrown
+  assert.throws(() => application(''));
+});
+
+test('Scenario (failure): An invalid application id cannot form a key -- id containing "#" throws', () => {
+  // When I call application("a#b")
+  // Then an Error is thrown, as script() does through assertValidId
+  assert.throws(() => application('a#b'), (err) => {
+    assert.strictEqual(err.message, 'invalid id: a#b');
+    return true;
+  });
+});
 
 test('Unit: deviceProfile builds the correct key', () => {
   const key = deviceProfile('dev-7');
@@ -327,4 +367,255 @@ test('E2E Scenario: Release platform rejection follows TASK-004 convention', () 
       `Platform ${platform} should throw with correct message`,
     );
   }
+});
+
+test('Unit: policyListIndex puts a policy into the POLICY gsi1 partition, sorted by name', async () => {
+  const { policyListIndex } = await import('../../dist/db/keys.js');
+  assert.deepStrictEqual(policyListIndex('Baseline'), { gsi1pk: 'POLICY', gsi1sk: 'Baseline' });
+  // Distinct from a policy's own `POLICY#<id>` partition.
+  assert.notStrictEqual(policyListIndex('x').gsi1pk, policy('x').pk);
+});
+
+// ============================================================================
+// TASK-055 AC25: Antivirus scan key builder
+// ============================================================================
+
+test('Unit: deviceAntivirusScan builds the correct key', () => {
+  const key = deviceAntivirusScan('d1');
+  assert.deepStrictEqual(key, { pk: 'DEVICE#d1', sk: 'AVSCAN' });
+});
+
+test('Unit: deviceAntivirusScan rejects a deviceId containing the separator', () => {
+  assert.throws(
+    () => deviceAntivirusScan('bad#id'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: bad#id');
+      return true;
+    }
+  );
+});
+
+// ============================================================================
+// TASK-058 AC18: Antivirus status key builder
+// ============================================================================
+
+test('Unit: deviceAntivirusStatus builds the correct key', () => {
+  const key = deviceAntivirusStatus('d1');
+  assert.deepStrictEqual(key, { pk: 'DEVICE#d1', sk: 'AVSTATUS' });
+});
+
+test('Unit: deviceAntivirusStatus rejects a deviceId containing the separator', () => {
+  assert.throws(
+    () => deviceAntivirusStatus('bad#id'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: bad#id');
+      return true;
+    }
+  );
+});
+
+test('Unit: deviceAntivirusStatus is distinct from deviceAntivirusScan', () => {
+  assert.notStrictEqual(deviceAntivirusStatus('d1').sk, deviceAntivirusScan('d1').sk);
+});
+
+// ============================================================================
+// TASK-034: Analytics Key Builder Tests
+// ============================================================================
+
+test('Unit: deviceAnalytics builds the correct key', () => {
+  const key = deviceAnalytics('d1');
+  assert.deepStrictEqual(key, { pk: 'DEVICE#d1', sk: 'ANALYTICS' });
+});
+
+test('Unit: deviceAnalytics rejects a deviceId containing the separator', () => {
+  assert.throws(
+    () => deviceAnalytics('bad#id'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: bad#id');
+      return true;
+    }
+  );
+});
+
+test('Unit: analyticsListIndex builds the correct gsi1 key', () => {
+  const key = analyticsListIndex('d1');
+  assert.deepStrictEqual(key, { gsi1pk: 'ANALYTICS', gsi1sk: 'd1' });
+});
+
+test('Unit: analyticsListIndex rejects a deviceId containing the separator', () => {
+  assert.throws(
+    () => analyticsListIndex('bad#id'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: bad#id');
+      return true;
+    }
+  );
+});
+
+test('Unit: deviceBootHistory builds the correct key', () => {
+  const key = deviceBootHistory('d1');
+  assert.deepStrictEqual(key, { pk: 'DEVICE#d1', sk: 'BOOTHISTORY' });
+});
+
+test('Unit: deviceBootHistory rejects a deviceId containing the separator', () => {
+  assert.throws(
+    () => deviceBootHistory('bad#id'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: bad#id');
+      return true;
+    }
+  );
+});
+
+test('Unit: deviceAppCrash builds the correct key', () => {
+  const key = deviceAppCrash('d1', '2026-10-02T06:58:12Z', 'abc');
+  assert.deepStrictEqual(key, { pk: 'DEVICE#d1', sk: 'APPCRASH#2026-10-02T06:58:12Z#abc' });
+});
+
+test('Unit: deviceAppCrash rejects a deviceId containing the separator', () => {
+  assert.throws(
+    () => deviceAppCrash('bad#id', '2026-10-02T06:58:12Z', 'abc'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: bad#id');
+      return true;
+    }
+  );
+});
+
+test('Unit: deviceAppCrash rejects an occurredAt containing the separator', () => {
+  assert.throws(
+    () => deviceAppCrash('d1', '2026-10-02#bad', 'abc'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: 2026-10-02#bad');
+      return true;
+    }
+  );
+});
+
+test('Unit: deviceAppCrash rejects an eventId containing the separator', () => {
+  assert.throws(
+    () => deviceAppCrash('d1', '2026-10-02T06:58:12Z', 'a#b'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: a#b');
+      return true;
+    }
+  );
+});
+
+test('Unit: appCrashListIndex builds the correct gsi1 key', () => {
+  const key = appCrashListIndex('2026-10-02T06:58:12Z', 'd1');
+  assert.deepStrictEqual(key, { gsi1pk: 'APPCRASH', gsi1sk: '2026-10-02T06:58:12Z#d1' });
+});
+
+test('Unit: appCrashListIndex rejects an occurredAt containing the separator', () => {
+  assert.throws(
+    () => appCrashListIndex('2026-10-02#bad', 'd1'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: 2026-10-02#bad');
+      return true;
+    }
+  );
+});
+
+test('Unit: appCrashListIndex rejects a deviceId containing the separator', () => {
+  assert.throws(
+    () => appCrashListIndex('2026-10-02T06:58:12Z', 'bad#id'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: bad#id');
+      return true;
+    }
+  );
+});
+
+test('Unit: APP_CRASH_SK_PREFIX is exported correctly', () => {
+  assert.strictEqual(APP_CRASH_SK_PREFIX, 'APPCRASH#');
+});
+
+test('E2E Scenario: Analytics key builders produce the pinned keys', () => {
+  // deviceAnalytics
+  assert.deepStrictEqual(deviceAnalytics('d1'), { pk: 'DEVICE#d1', sk: 'ANALYTICS' });
+
+  // analyticsListIndex
+  assert.deepStrictEqual(analyticsListIndex('d1'), { gsi1pk: 'ANALYTICS', gsi1sk: 'd1' });
+
+  // deviceBootHistory
+  assert.deepStrictEqual(deviceBootHistory('d1'), { pk: 'DEVICE#d1', sk: 'BOOTHISTORY' });
+
+  // deviceAppCrash
+  assert.deepStrictEqual(deviceAppCrash('d1', '2026-10-02T06:58:12Z', 'abc'),
+    { pk: 'DEVICE#d1', sk: 'APPCRASH#2026-10-02T06:58:12Z#abc' });
+
+  // appCrashListIndex
+  assert.deepStrictEqual(appCrashListIndex('2026-10-02T06:58:12Z', 'd1'),
+    { gsi1pk: 'APPCRASH', gsi1sk: '2026-10-02T06:58:12Z#d1' });
+
+  // APP_CRASH_SK_PREFIX
+  assert.strictEqual(APP_CRASH_SK_PREFIX, 'APPCRASH#');
+});
+
+test('E2E Scenario: Analytics key builders reject ids carrying the separator', () => {
+  // deviceAnalytics
+  assert.throws(() => deviceAnalytics('bad#id'), (err) => err.message === 'invalid id: bad#id');
+
+  // deviceBootHistory
+  assert.throws(() => deviceBootHistory('bad#id'), (err) => err.message === 'invalid id: bad#id');
+
+  // deviceAppCrash
+  assert.throws(() => deviceAppCrash('d1', '2026-10-02T06:58:12Z', 'a#b'), (err) => err.message === 'invalid id: a#b');
+
+  // analyticsListIndex
+  assert.throws(() => analyticsListIndex('bad#id'), (err) => err.message === 'invalid id: bad#id');
+
+  // appCrashListIndex
+  assert.throws(() => appCrashListIndex('2026-10-02T06:58:12Z', 'bad#id'), (err) => err.message === 'invalid id: bad#id');
+});
+
+// ============================================================================
+// TASK-038: Software List Index Key Builder Tests
+// ============================================================================
+
+test('Unit: inventoryListIndex builds the correct gsi1 key (AC1)', () => {
+  const key = inventoryListIndex('dev-7');
+  assert.deepStrictEqual(key, { gsi1pk: 'INVENTORY', gsi1sk: 'dev-7' });
+});
+
+test('Unit: inventoryListIndex works with various device ids', () => {
+  const key1 = inventoryListIndex('d1');
+  assert.deepStrictEqual(key1, { gsi1pk: 'INVENTORY', gsi1sk: 'd1' });
+
+  const key2 = inventoryListIndex('device-abc');
+  assert.deepStrictEqual(key2, { gsi1pk: 'INVENTORY', gsi1sk: 'device-abc' });
+
+  const key3 = inventoryListIndex('dev-123-xyz');
+  assert.deepStrictEqual(key3, { gsi1pk: 'INVENTORY', gsi1sk: 'dev-123-xyz' });
+});
+
+test('Unit: inventoryListIndex rejects a deviceId containing the separator (AC1, failure)', () => {
+  assert.throws(
+    () => inventoryListIndex('a#b'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: a#b');
+      return true;
+    }
+  );
+});
+
+test('Unit: inventoryListIndex rejects deviceIds with multiple separators', () => {
+  assert.throws(
+    () => inventoryListIndex('a#b#c'),
+    (err) => {
+      assert.strictEqual(err.message, 'invalid id: a#b#c');
+      return true;
+    }
+  );
+});
+
+test('E2E Scenario: Inventory list key builder produces the pinned keys', () => {
+  assert.deepStrictEqual(inventoryListIndex('d1'), { gsi1pk: 'INVENTORY', gsi1sk: 'd1' });
+  assert.deepStrictEqual(inventoryListIndex('dev-7'), { gsi1pk: 'INVENTORY', gsi1sk: 'dev-7' });
+});
+
+test('E2E Scenario: Inventory list key builder rejects invalid ids', () => {
+  assert.throws(() => inventoryListIndex('bad#id'), (err) => err.message === 'invalid id: bad#id');
+  assert.throws(() => inventoryListIndex('a#b#c'), (err) => err.message === 'invalid id: a#b#c');
 });

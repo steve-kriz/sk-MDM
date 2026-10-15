@@ -11,9 +11,10 @@
  *
  * The custom domain comes from `resolveDomainSettings`: `MDM_DOMAIN_NAME` /
  * `MDM_CERTIFICATE_ARN` / `MDM_HOSTED_ZONE_ID`, then CDK context `domainName` /
- * `certificateArn` / `hostedZoneId`. `domainName` defaults to `mdm.officehq.cc`,
- * so every synth or deploy must supply the us-east-1 ACM certificate ARN
- * (`MDM_CERTIFICATE_ARN` or `-c certificateArn=...`), or synth throws.
+ * `certificateArn` / `hostedZoneId`; the certificate ARN finally falls back to
+ * the `MDM_CERTIFICATE_ARN` key of `prod/sk-mdm`. `domainName` defaults to
+ * `mdm.officehq.cc`, so the us-east-1 ACM certificate ARN must come from one of
+ * those sources, or synth throws.
  */
 import { App } from 'aws-cdk-lib';
 
@@ -48,10 +49,12 @@ new MdmStack(app, 'MdmStack', {
   entraTenantId,
   entraClientId,
   entraAdminGroupId: setting('ENTRA_ADMIN_GROUP_ID', 'entraAdminGroupId'),
-  ...resolveDomainSettings({ env: process.env, context: (k) => app.node.tryGetContext(k) }),
+  ...resolveDomainSettings({ env: process.env, context: (k) => app.node.tryGetContext(k), secret }),
   // Optional: the stack defaults to `prod/sk-mdm` / `ENTRA_CLIENT_SECRET`.
   graphSecretName: setting('GRAPH_SECRET_NAME', 'graphSecretName'),
   graphSecretKey: setting('GRAPH_SECRET_KEY', 'graphSecretKey'),
+  // Optional (TASK-053): without it the AI script generator is off.
+  bedrockModelId: setting('MDM_BEDROCK_MODEL_ID', 'bedrockModelId'),
 });
 
 app.synth();

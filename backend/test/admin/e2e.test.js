@@ -120,7 +120,7 @@ class FakeTable {
 
 class StubVerifier {
   constructor(claims = {}) {
-    this.claims = { sub: 'user123', roles: ['MDM.Admin'], ...claims };
+    this.claims = { sub: 'user123', roles: ['MDM.Administrator'], ...claims };
   }
 
   async verify(token) {

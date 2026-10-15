@@ -324,6 +324,11 @@ func TestUnit_ErrorSuffixExtraction(t *testing.T) {
 			expected: " (invalid_token)",
 		},
 		{
+			name:     "error with the offending fields",
+			input:    `{"error":"invalid_request","fields":["osVersion","hardwareUuid"]}`,
+			expected: " (invalid_request: osVersion, hardwareUuid)",
+		},
+		{
 			name:     "empty error",
 			input:    `{"error":""}`,
 			expected: "",

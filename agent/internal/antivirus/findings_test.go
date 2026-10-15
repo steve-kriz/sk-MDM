@@ -641,3 +641,226 @@ func TestScenario_UnsupportedGoosCollectsNothing(t *testing.T) {
 		t.Errorf("expected no runner calls, got %v", calls)
 	}
 }
+
+// ----------------------------------------------------------------------------
+// AC12: Windows findings carry status, action and category.
+// ----------------------------------------------------------------------------
+
+// TestScenario_AC12_WindowsFindingsCarryStatusActionAndCategory covers the
+// main scenario.
+func TestScenario_AC12_WindowsFindingsCarryStatusActionAndCategory(t *testing.T) {
+	line := `{"detectionId":"id-1","threatName":"T","severityId":5,"detectedAt":"2026-10-02T07:15:00Z",` +
+		`"resources":[],"actionSuccess":true,"categoryId":8,"statusId":3,"actionId":2,"active":true,` +
+		`"lastStatusChangeAt":"2026-10-02T07:00:00Z","remediatedAt":null,"processName":"C:\\x.exe","user":"CONTOSO\\a"}`
+
+	runner := fake.NewCommandRunner()
+	runner.Results[findingsCommandKey()] = platform.CommandResult{Stdout: line, ExitCode: 0}
+	clock := fake.NewClock(time.Now())
+
+	findings, warnings := antivirus.CollectFindings(runner, clock, "windows")
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Status != "quarantined" {
+		t.Errorf("status = %q, want quarantined", f.Status)
+	}
+	if f.Action != "quarantine" {
+		t.Errorf("action = %q, want quarantine", f.Action)
+	}
+	if f.Category != "Trojan" {
+		t.Errorf("category = %q, want Trojan", f.Category)
+	}
+	if f.Active == nil || !*f.Active {
+		t.Errorf("active = %v, want true", f.Active)
+	}
+	if f.LastStatusChangeAt != "2026-10-02T07:00:00Z" {
+		t.Errorf("lastStatusChangeAt = %q, want 2026-10-02T07:00:00Z", f.LastStatusChangeAt)
+	}
+	if f.ProcessName != "C:\\x.exe" {
+		t.Errorf("processName = %q, want C:\\x.exe", f.ProcessName)
+	}
+	if f.User != "CONTOSO\\a" {
+		t.Errorf("user = %q, want CONTOSO\\a", f.User)
+	}
+}
+
+// TestScenario_AC12Edge_UnknownIdsAndOldOutput covers the unmapped-id and
+// old-output-shape edge scenario.
+func TestScenario_AC12Edge_UnknownIdsAndOldOutput(t *testing.T) {
+	line := `{"detectionId":"id-1","threatName":"T","severityId":1,"detectedAt":"2026-10-02T07:15:00Z",` +
+		`"resources":[],"actionSuccess":false,"categoryId":777,"statusId":999,"actionId":999}`
+
+	runner := fake.NewCommandRunner()
+	runner.Results[findingsCommandKey()] = platform.CommandResult{Stdout: line, ExitCode: 0}
+	clock := fake.NewClock(time.Now())
+
+	findings, warnings := antivirus.CollectFindings(runner, clock, "windows")
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Status != "unknown" {
+		t.Errorf("status = %q, want unknown", f.Status)
+	}
+	if f.Action != "unknown" {
+		t.Errorf("action = %q, want unknown", f.Action)
+	}
+	if f.Category != "Category 777" {
+		t.Errorf("category = %q, want 'Category 777'", f.Category)
+	}
+
+	// A line without the new keys at all marshals with exactly the six
+	// original keys.
+	oldLine := `{"detectionId":"id-2","threatName":"T","severityId":1,"detectedAt":"2026-10-02T07:15:00Z",` +
+		`"resources":[],"actionSuccess":false}`
+	runner2 := fake.NewCommandRunner()
+	runner2.Results[findingsCommandKey()] = platform.CommandResult{Stdout: oldLine, ExitCode: 0}
+	findings2, warnings2 := antivirus.CollectFindings(runner2, clock, "windows")
+	if len(warnings2) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings2)
+	}
+	if len(findings2) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings2))
+	}
+	data, err := json.Marshal(findings2[0])
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	wantKeys := []string{"findingId", "threatName", "severity", "detectedAt", "resources", "remediated"}
+	if len(fields) != len(wantKeys) {
+		t.Fatalf("marshalled finding has keys %v, want exactly %v", keysOf(fields), wantKeys)
+	}
+	for _, key := range wantKeys {
+		if _, ok := fields[key]; !ok {
+			t.Errorf("marshalled finding is missing key %q", key)
+		}
+	}
+}
+
+// TestScenario_AC12Edge_ThreatRecordGone covers the missing-$t edge scenario:
+// a categoryId/active of null must never surface as 0/false.
+func TestScenario_AC12Edge_ThreatRecordGone(t *testing.T) {
+	if !strings.Contains(antivirus.WindowsFindingsScript, "if ($null -ne $t)") {
+		t.Fatal("WindowsFindingsScript should guard categoryId/active with 'if ($null -ne $t)'")
+	}
+
+	line := `{"detectionId":"id-1","threatName":"T","severityId":1,"detectedAt":"2026-10-02T07:15:00Z",` +
+		`"resources":[],"actionSuccess":false,"categoryId":null,"statusId":3,"actionId":2,"active":null}`
+
+	runner := fake.NewCommandRunner()
+	runner.Results[findingsCommandKey()] = platform.CommandResult{Stdout: line, ExitCode: 0}
+	clock := fake.NewClock(time.Now())
+
+	findings, warnings := antivirus.CollectFindings(runner, clock, "windows")
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+	if len(findings) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings))
+	}
+	f := findings[0]
+	if f.Status != "quarantined" {
+		t.Errorf("status = %q, want quarantined", f.Status)
+	}
+	if f.Action != "quarantine" {
+		t.Errorf("action = %q, want quarantine", f.Action)
+	}
+
+	data, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(data, &fields); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if _, ok := fields["category"]; ok {
+		t.Error("marshalled finding should have no category key")
+	}
+	if _, ok := fields["active"]; ok {
+		t.Error("marshalled finding should have no active key")
+	}
+
+	// categoryId 0 also yields no category key (0 is absent, never "Category 0").
+	zeroLine := `{"detectionId":"id-2","threatName":"T","severityId":1,"detectedAt":"2026-10-02T07:15:00Z",` +
+		`"resources":[],"actionSuccess":false,"categoryId":0}`
+	runner2 := fake.NewCommandRunner()
+	runner2.Results[findingsCommandKey()] = platform.CommandResult{Stdout: zeroLine, ExitCode: 0}
+	findings2, _ := antivirus.CollectFindings(runner2, clock, "windows")
+	if len(findings2) != 1 {
+		t.Fatalf("expected 1 finding, got %d", len(findings2))
+	}
+	data2, err := json.Marshal(findings2[0])
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+	var fields2 map[string]any
+	if err := json.Unmarshal(data2, &fields2); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+	if _, ok := fields2["category"]; ok {
+		t.Error("categoryId 0 should yield no category key")
+	}
+}
+
+// keysOf returns the keys of m, for readable failure messages.
+func keysOf(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+// ----------------------------------------------------------------------------
+// AC13: macOS findings keep the original six keys.
+// ----------------------------------------------------------------------------
+
+// TestScenario_AC13_MacOSFindingsKeepTheOriginalSixKeys covers the scenario,
+// using the existing darwin findings fixture.
+func TestScenario_AC13_MacOSFindingsKeepTheOriginalSixKeys(t *testing.T) {
+	runner := fake.NewCommandRunner()
+	runner.Results[darwinCommandKey()] = platform.CommandResult{
+		Stdout:   loadFixture(t, "darwin", "findings.ndjson"),
+		ExitCode: 0,
+	}
+	clock := fake.NewClock(time.Now())
+
+	findings, warnings := antivirus.CollectFindings(runner, clock, "darwin")
+	if len(warnings) != 0 {
+		t.Fatalf("expected no warnings, got %v", warnings)
+	}
+	if len(findings) == 0 {
+		t.Fatal("expected at least one finding from the darwin fixture")
+	}
+	wantKeys := []string{"findingId", "threatName", "severity", "detectedAt", "resources", "remediated"}
+	for _, finding := range findings {
+		data, err := json.Marshal(finding)
+		if err != nil {
+			t.Fatalf("failed to marshal: %v", err)
+		}
+		var fields map[string]any
+		if err := json.Unmarshal(data, &fields); err != nil {
+			t.Fatalf("failed to unmarshal: %v", err)
+		}
+		if len(fields) != len(wantKeys) {
+			t.Fatalf("macOS finding has keys %v, want exactly %v", keysOf(fields), wantKeys)
+		}
+		for _, forbidden := range []string{"category", "status", "action", "active", "lastStatusChangeAt", "remediatedAt", "processName", "user"} {
+			if _, ok := fields[forbidden]; ok {
+				t.Errorf("macOS finding should not have key %q", forbidden)
+			}
+		}
+	}
+}

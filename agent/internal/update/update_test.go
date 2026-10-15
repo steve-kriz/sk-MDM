@@ -5,13 +5,18 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/officehq/sk-mdm/agent/internal/contract"
+	"github.com/officehq/sk-mdm/agent/internal/logging"
 	"github.com/officehq/sk-mdm/agent/internal/platform/fake"
+	"github.com/officehq/sk-mdm/agent/internal/service"
 )
 
 // ============================================================================
@@ -543,5 +548,484 @@ func TestUnit_RollbackRequiresDeps(t *testing.T) {
 	})
 	if err == nil {
 		t.Error("RollbackIfUnhealthy should fail with no Path")
+	}
+}
+
+// ============================================================================
+// TASK-061: exit-to-restart sentinel
+//
+// E2E cucumber-style scenarios (Given/When/Then, from the ticket's Gherkin).
+// Everything that would touch the host -- the filesystem and the download --
+// is a fake; no real disk, network or database is used.
+// ============================================================================
+
+// AC2: A successful Apply swaps the binary then returns the restart sentinel.
+func TestScenario_AC2_SuccessfulApplyReturnsRestartSentinel(t *testing.T) {
+	// Given an installed binary of version "1.0.8" and a download of "1.0.9"
+	// whose SHA-256 matches
+	fsys := fake.NewFS()
+	fsys.Seed("/usr/local/bin/mdmagent", []byte("1.0.8 binary"))
+	newBinary := []byte("1.0.9 binary")
+	doer := newFakeHTTPDoer(200, newBinary)
+
+	// And the Restart hook returns service.ErrRestartRequired
+	deps := &Deps{
+		FS:             fsys,
+		Doer:           doer,
+		Path:           "/usr/local/bin/mdmagent",
+		CurrentVersion: "1.0.8",
+		Restart: func(ctx context.Context) error {
+			return service.ErrRestartRequired
+		},
+	}
+
+	rel := contract.AgentRelease{
+		Version: "1.0.9",
+		URL:     "https://example.com/agent",
+		SHA256:  computeSHA256(newBinary),
+	}
+
+	// When update.Apply is called with release "1.0.9"
+	err := Apply(context.Background(), rel, deps)
+
+	// Then "<path>.old" holds the 1.0.8 bytes and "<path>" holds the 1.0.9 bytes
+	old, ok := fsys.Content("/usr/local/bin/mdmagent.old")
+	if !ok || !bytes.Equal(old, []byte("1.0.8 binary")) {
+		t.Errorf(".old = %q (exists=%v), want the 1.0.8 bytes", old, ok)
+	}
+	cur, ok := fsys.Content("/usr/local/bin/mdmagent")
+	if !ok || !bytes.Equal(cur, newBinary) {
+		t.Errorf("binary = %q (exists=%v), want the 1.0.9 bytes", cur, ok)
+	}
+	// And "<path>.update-pending" contains "1.0.9"
+	marker, ok := fsys.Content("/usr/local/bin/mdmagent.update-pending")
+	if !ok || string(marker) != "1.0.9" {
+		t.Errorf("marker = %q (exists=%v), want 1.0.9", marker, ok)
+	}
+	// And the returned error matches service.ErrRestartRequired
+	if !errors.Is(err, service.ErrRestartRequired) {
+		t.Errorf("Apply returned %v, want ErrRestartRequired", err)
+	}
+}
+
+// AC2 edge: a checksum mismatch never reaches the restart.
+func TestScenario_AC2_ChecksumMismatchNeverReachesRestart(t *testing.T) {
+	// Given a download whose SHA-256 does not match the release
+	fsys := fake.NewFS()
+	fsys.Seed("/usr/local/bin/mdmagent", []byte("original binary"))
+	doer := newFakeHTTPDoer(200, []byte("tampered build"))
+
+	restartCalled := false
+	deps := &Deps{
+		FS:             fsys,
+		Doer:           doer,
+		Path:           "/usr/local/bin/mdmagent",
+		CurrentVersion: "1.0.8",
+		Restart: func(ctx context.Context) error {
+			restartCalled = true
+			return service.ErrRestartRequired
+		},
+	}
+
+	rel := contract.AgentRelease{
+		Version: "1.0.9",
+		URL:     "https://example.com/agent",
+		SHA256:  strings.Repeat("a", 64),
+	}
+
+	// When update.Apply is called
+	err := Apply(context.Background(), rel, deps)
+
+	// Then the Restart hook is not called
+	if restartCalled {
+		t.Error("Restart should not be called on a checksum mismatch")
+	}
+	// And the installed binary is byte-identical
+	content, ok := fsys.Content("/usr/local/bin/mdmagent")
+	if !ok || !bytes.Equal(content, []byte("original binary")) {
+		t.Errorf("binary = %q (exists=%v), want it unchanged", content, ok)
+	}
+	if err == nil {
+		t.Error("Apply should fail on a checksum mismatch")
+	}
+}
+
+// AC8 (update half): RollbackIfUnhealthy forwards the restart sentinel,
+// having already rolled the replaced binary back. The full AC8 scenario --
+// settleUpdate's suppressed log, Start returning before the scheduler and the
+// zero HTTP requests -- is covered end to end in
+// agent/cmd/mdmagent/restart_test.go.
+func TestScenario_AC8_RollbackForwardsRestartSentinel(t *testing.T) {
+	// Given "<path>.update-pending" contains "1.0.9" while the running
+	// version is "1.0.8", and "<path>.old" exists
+	fsys := fake.NewFS()
+	oldBinary := []byte("1.0.8 binary")
+	fsys.Seed("/usr/local/bin/mdmagent", []byte("1.0.9 binary"))
+	fsys.Seed("/usr/local/bin/mdmagent.old", oldBinary)
+	fsys.Seed("/usr/local/bin/mdmagent.update-pending", []byte("1.0.9"))
+
+	deps := &Deps{
+		FS:             fsys,
+		Path:           "/usr/local/bin/mdmagent",
+		CurrentVersion: "1.0.8",
+		Restart: func(ctx context.Context) error {
+			return service.ErrRestartRequired
+		},
+	}
+
+	// When RollbackIfUnhealthy runs at start
+	err := RollbackIfUnhealthy(deps)
+
+	// Then "<path>.old" has been renamed back to "<path>"
+	content, ok := fsys.Content("/usr/local/bin/mdmagent")
+	if !ok || !bytes.Equal(content, oldBinary) {
+		t.Errorf("binary = %q (exists=%v), want the old bytes restored", content, ok)
+	}
+	if fsys.Exists("/usr/local/bin/mdmagent.update-pending") {
+		t.Error("the pending marker should be deleted")
+	}
+	// And the returned error matches service.ErrRestartRequired
+	if !errors.Is(err, service.ErrRestartRequired) {
+		t.Errorf("RollbackIfUnhealthy returned %v, want ErrRestartRequired", err)
+	}
+}
+
+// AC9 edge: RollbackIfUnhealthy returning a non-sentinel error (a failed
+// rename, because "<path>.old" does not exist) is returned unchanged, and the
+// Restart hook is never reached.
+func TestScenario_AC9_RollbackRenameFailureIsReturnedUnchanged(t *testing.T) {
+	// Given a pending marker naming another version and no "<path>.old" file
+	fsys := fake.NewFS()
+	fsys.Seed("/usr/local/bin/mdmagent.update-pending", []byte("1.0.9"))
+
+	restartCalled := false
+	deps := &Deps{
+		FS:             fsys,
+		Path:           "/usr/local/bin/mdmagent",
+		CurrentVersion: "1.0.8",
+		Restart: func(ctx context.Context) error {
+			restartCalled = true
+			return service.ErrRestartRequired
+		},
+	}
+
+	// When RollbackIfUnhealthy runs at start
+	err := RollbackIfUnhealthy(deps)
+
+	// Then it fails with a plain error, not the restart sentinel, and the
+	// restart hook is never reached
+	if err == nil {
+		t.Fatal("RollbackIfUnhealthy should fail when the rename fails")
+	}
+	if errors.Is(err, service.ErrRestartRequired) {
+		t.Errorf("RollbackIfUnhealthy returned the restart sentinel, want a plain rename error: %v", err)
+	}
+	if restartCalled {
+		t.Error("Restart should not be called when the rollback itself failed")
+	}
+}
+
+// ============================================================================
+// AC10: RollbackIfUnhealthy writes a rollback record before restarting.
+// ============================================================================
+
+// TestScenario_AC10_ARollbackWritesItsRecordBeforeRestarting covers:
+//
+//	Given a marker naming "1.5.0", a running build reporting "1.4.9" and a
+//	     fake clock at 2026-10-12T02:00:00Z
+//	When RollbackIfUnhealthy runs
+//	Then <path>.update-rollback holds installedVersion "1.5.0", runningVersion
+//	     "1.4.9", occurredAt "2026-10-12T02:00:00Z"
+//	And the restart hook was called after the record was written
+func TestScenario_AC10_ARollbackWritesItsRecordBeforeRestarting(t *testing.T) {
+	fsys := fake.NewFS()
+	fsys.Seed("/usr/local/bin/mdmagent", []byte("broken binary"))
+	fsys.Seed("/usr/local/bin/mdmagent.old", []byte("working binary"))
+	fsys.Seed("/usr/local/bin/mdmagent.update-pending", []byte("1.5.0"))
+	clock := fake.NewClock(time.Date(2026, 10, 12, 2, 0, 0, 0, time.UTC))
+
+	var recordPresentAtRestart bool
+	deps := &Deps{
+		FS:             fsys,
+		Path:           "/usr/local/bin/mdmagent",
+		CurrentVersion: "1.4.9",
+		Clock:          clock,
+		Restart: func(ctx context.Context) error {
+			recordPresentAtRestart = fsys.Exists(RollbackPath("/usr/local/bin/mdmagent"))
+			return nil
+		},
+	}
+
+	if err := RollbackIfUnhealthy(deps); err != nil {
+		t.Fatalf("RollbackIfUnhealthy failed: %v", err)
+	}
+
+	if !recordPresentAtRestart {
+		t.Fatal("expected the rollback record to exist before Restart was called")
+	}
+
+	data, ok := fsys.Content(RollbackPath("/usr/local/bin/mdmagent"))
+	if !ok {
+		t.Fatal("expected a rollback record file")
+	}
+	var record rollbackRecordFile
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatalf("rollback record is not valid JSON: %v", err)
+	}
+	if record.InstalledVersion != "1.5.0" || record.RunningVersion != "1.4.9" || record.OccurredAt != "2026-10-12T02:00:00Z" {
+		t.Errorf("record = %+v, want installedVersion=1.5.0 runningVersion=1.4.9 occurredAt=2026-10-12T02:00:00Z", record)
+	}
+	if mode, ok := fsys.Mode(RollbackPath("/usr/local/bin/mdmagent")); !ok || mode != MarkerFileMode {
+		t.Errorf("rollback record mode = %v, want %v", mode, MarkerFileMode)
+	}
+}
+
+// TestScenario_AC10_AFailedRecordWriteDoesNotStopTheRollback covers:
+//
+//	Given the record write fails
+//	When RollbackIfUnhealthy takes the rollback branch
+//	Then one warn line "update rollback record not written" is logged
+//	And the old binary is back and the restart hook's error is returned
+func TestScenario_AC10_AFailedRecordWriteDoesNotStopTheRollback(t *testing.T) {
+	fsys := fake.NewFS()
+	oldBinary := []byte("working binary")
+	fsys.Seed("/usr/local/bin/mdmagent", []byte("broken binary"))
+	fsys.Seed("/usr/local/bin/mdmagent.old", oldBinary)
+	fsys.Seed("/usr/local/bin/mdmagent.update-pending", []byte("1.5.0"))
+	fsys.FailWrite(RollbackPath("/usr/local/bin/mdmagent"), errors.New("disk full"))
+
+	logFS := fake.NewFS()
+	logger := logging.New(logFS, fake.NewClock(time.Now()), "/agent.log", logging.LevelInfo, "agent")
+
+	restartErr := errors.New("restart sentinel")
+	deps := &Deps{
+		FS:             fsys,
+		Path:           "/usr/local/bin/mdmagent",
+		CurrentVersion: "1.4.9",
+		Logger:         logger,
+		Restart: func(ctx context.Context) error {
+			return restartErr
+		},
+	}
+
+	err := RollbackIfUnhealthy(deps)
+	if !errors.Is(err, restartErr) {
+		t.Fatalf("RollbackIfUnhealthy returned %v, want the restart hook's error", err)
+	}
+
+	content, exists := fsys.Content("/usr/local/bin/mdmagent")
+	if !exists || !bytes.Equal(content, oldBinary) {
+		t.Error("expected the old binary to be restored despite the record write failing")
+	}
+
+	logData, _ := logFS.Content("/agent.log")
+	if !strings.Contains(string(logData), "update rollback record not written") {
+		t.Errorf("expected a warn line \"update rollback record not written\", got log: %s", logData)
+	}
+}
+
+// TestScenario_AC10_AHealthySettleWritesNoRecord covers:
+//
+//	Given a marker naming the running version
+//	When RollbackIfUnhealthy runs
+//	Then no <path>.update-rollback file exists
+func TestScenario_AC10_AHealthySettleWritesNoRecord(t *testing.T) {
+	fsys := fake.NewFS()
+	fsys.Seed("/usr/local/bin/mdmagent.update-pending", []byte("1.3.0"))
+
+	deps := &Deps{
+		FS:             fsys,
+		Path:           "/usr/local/bin/mdmagent",
+		CurrentVersion: "1.3.0",
+	}
+	if err := RollbackIfUnhealthy(deps); err != nil {
+		t.Fatalf("RollbackIfUnhealthy failed: %v", err)
+	}
+	if fsys.Exists(RollbackPath("/usr/local/bin/mdmagent")) {
+		t.Error("a healthy settle should write no rollback record")
+	}
+}
+
+// TestScenario_AC10Edge_ASupersededSettleWritesNoRecord covers the superseded
+// branch alongside the healthy one: an update.Apply that was never unhealthy
+// and never rolled back must never leave a rollback record.
+func TestScenario_AC10Edge_ASupersededSettleWritesNoRecord(t *testing.T) {
+	fsys := fake.NewFS()
+	fsys.Seed("/usr/local/bin/mdmagent.update-pending", []byte("1.3.0"))
+	fsys.Seed("/usr/local/bin/mdmagent.old", []byte("old binary"))
+
+	deps := &Deps{
+		FS:             fsys,
+		Path:           "/usr/local/bin/mdmagent",
+		CurrentVersion: "1.4.0", // ahead of the marker: superseded by a newer install
+	}
+	if err := RollbackIfUnhealthy(deps); err != nil {
+		t.Fatalf("RollbackIfUnhealthy failed: %v", err)
+	}
+	if fsys.Exists(RollbackPath("/usr/local/bin/mdmagent")) {
+		t.Error("a superseded settle should write no rollback record")
+	}
+}
+
+// ============================================================================
+// AC11: TakeRollbackRecord.
+// ============================================================================
+
+// TestScenario_AC11_TheNextStartTakesTheRecord covers the TakeRollbackRecord
+// half of "The next start takes the record (AC11, AC12)":
+//
+//	Given <path>.update-rollback holds a valid record at 2026-10-12T02:00:00Z
+//	When TakeRollbackRecord runs
+//	Then the file is deleted and the record is returned
+func TestScenario_AC11_TheNextStartTakesTheRecord(t *testing.T) {
+	fsys := fake.NewFS()
+	fsys.Seed(RollbackPath("/usr/local/bin/mdmagent"), []byte(
+		`{"installedVersion":"1.5.0","runningVersion":"1.4.9","occurredAt":"2026-10-12T02:00:00Z"}`,
+	))
+	deps := &Deps{FS: fsys, Path: "/usr/local/bin/mdmagent"}
+
+	rec, ok := TakeRollbackRecord(deps)
+	if !ok {
+		t.Fatal("expected TakeRollbackRecord to return true")
+	}
+	if rec.InstalledVersion != "1.5.0" || rec.RunningVersion != "1.4.9" {
+		t.Errorf("record = %+v", rec)
+	}
+	wantAt := time.Date(2026, 10, 12, 2, 0, 0, 0, time.UTC)
+	if !rec.OccurredAt.Equal(wantAt) {
+		t.Errorf("OccurredAt = %v, want %v", rec.OccurredAt, wantAt)
+	}
+	if fsys.Exists(RollbackPath("/usr/local/bin/mdmagent")) {
+		t.Error("expected the record file to be deleted")
+	}
+}
+
+// TestScenario_AC11_AbsentFileReturnsFalseAndTouchesNothing covers: "Absent
+// file: returns false and touches nothing."
+func TestScenario_AC11_AbsentFileReturnsFalseAndTouchesNothing(t *testing.T) {
+	fsys := fake.NewFS()
+	deps := &Deps{FS: fsys, Path: "/usr/local/bin/mdmagent"}
+
+	_, ok := TakeRollbackRecord(deps)
+	if ok {
+		t.Error("expected false for an absent record file")
+	}
+	if len(fsys.Paths()) != 0 {
+		t.Errorf("expected no files to be touched, got %v", fsys.Paths())
+	}
+}
+
+// TestScenario_AC11_AnUnreadableRecordIsDiscarded covers:
+//
+//	Given <path>.update-rollback holds "not json"
+//	When TakeRollbackRecord runs
+//	Then it returns false, deletes the file and logs "update rollback record unreadable"
+func TestScenario_AC11_AnUnreadableRecordIsDiscarded(t *testing.T) {
+	fsys := fake.NewFS()
+	fsys.Seed(RollbackPath("/usr/local/bin/mdmagent"), []byte("not json"))
+
+	logFS := fake.NewFS()
+	logger := logging.New(logFS, fake.NewClock(time.Now()), "/agent.log", logging.LevelInfo, "agent")
+	deps := &Deps{FS: fsys, Path: "/usr/local/bin/mdmagent", Logger: logger}
+
+	_, ok := TakeRollbackRecord(deps)
+	if ok {
+		t.Error("expected false for unparseable content")
+	}
+	if fsys.Exists(RollbackPath("/usr/local/bin/mdmagent")) {
+		t.Error("expected the unreadable record file to be deleted")
+	}
+	logData, _ := logFS.Content("/agent.log")
+	if !strings.Contains(string(logData), "update rollback record unreadable") {
+		t.Errorf("expected a warn line \"update rollback record unreadable\", got log: %s", logData)
+	}
+}
+
+// TestScenario_AC11Edge_EmptyInstalledVersionIsDiscarded covers: valid JSON
+// but an empty installedVersion is treated the same as unreadable content.
+func TestScenario_AC11Edge_EmptyInstalledVersionIsDiscarded(t *testing.T) {
+	fsys := fake.NewFS()
+	fsys.Seed(RollbackPath("/usr/local/bin/mdmagent"), []byte(
+		`{"installedVersion":"","runningVersion":"1.4.9","occurredAt":"2026-10-12T02:00:00Z"}`,
+	))
+	deps := &Deps{FS: fsys, Path: "/usr/local/bin/mdmagent"}
+
+	_, ok := TakeRollbackRecord(deps)
+	if ok {
+		t.Error("expected false for an empty installedVersion")
+	}
+	if fsys.Exists(RollbackPath("/usr/local/bin/mdmagent")) {
+		t.Error("expected the record file to still be deleted")
+	}
+}
+
+// TestScenario_AC11Edge_UnparseableOccurredAtIsDiscarded covers: valid JSON
+// with a non-RFC-3339 occurredAt is discarded the same way.
+func TestScenario_AC11Edge_UnparseableOccurredAtIsDiscarded(t *testing.T) {
+	fsys := fake.NewFS()
+	fsys.Seed(RollbackPath("/usr/local/bin/mdmagent"), []byte(
+		`{"installedVersion":"1.5.0","runningVersion":"1.4.9","occurredAt":"not-a-time"}`,
+	))
+	deps := &Deps{FS: fsys, Path: "/usr/local/bin/mdmagent"}
+
+	_, ok := TakeRollbackRecord(deps)
+	if ok {
+		t.Error("expected false for an unparseable occurredAt")
+	}
+}
+
+// TestScenario_AC11Edge_AFailedDeleteIsLoggedAndDoesNotChangeTheResult covers:
+// "A failed delete is logged at warn and does not change the return value."
+func TestScenario_AC11Edge_AFailedDeleteIsLoggedAndDoesNotChangeTheResult(t *testing.T) {
+	fsys := fake.NewFS()
+	fsys.Seed(RollbackPath("/usr/local/bin/mdmagent"), []byte(
+		`{"installedVersion":"1.5.0","runningVersion":"1.4.9","occurredAt":"2026-10-12T02:00:00Z"}`,
+	))
+	path := RollbackPath("/usr/local/bin/mdmagent")
+	fsys.RemoveErr = func(candidate string) error {
+		if candidate == path {
+			return errors.New("remove failed")
+		}
+		return nil
+	}
+
+	logFS := fake.NewFS()
+	logger := logging.New(logFS, fake.NewClock(time.Now()), "/agent.log", logging.LevelInfo, "agent")
+	deps := &Deps{FS: fsys, Path: "/usr/local/bin/mdmagent", Logger: logger}
+
+	rec, ok := TakeRollbackRecord(deps)
+	if !ok {
+		t.Fatal("expected the record to still be returned despite the failed delete")
+	}
+	if rec.InstalledVersion != "1.5.0" {
+		t.Errorf("record = %+v", rec)
+	}
+	logData, _ := logFS.Content("/agent.log")
+	if !strings.Contains(string(logData), "warn") {
+		t.Errorf("expected a warn line logged for the failed delete, got log: %s", logData)
+	}
+}
+
+// TestScenario_AC11Edge_NilDepsReturnsFalse covers TakeRollbackRecord's guard
+// clauses: nil deps, nil FS and an empty Path all return false.
+func TestScenario_AC11Edge_NilDepsReturnsFalse(t *testing.T) {
+	if _, ok := TakeRollbackRecord(nil); ok {
+		t.Error("TakeRollbackRecord(nil) should return false")
+	}
+	if _, ok := TakeRollbackRecord(&Deps{}); ok {
+		t.Error("TakeRollbackRecord with a nil FS should return false")
+	}
+	if _, ok := TakeRollbackRecord(&Deps{FS: fake.NewFS()}); ok {
+		t.Error("TakeRollbackRecord with an empty Path should return false")
+	}
+}
+
+// TestScenario_AC10_RollbackPathHelper pins RollbackPath's shape.
+func TestScenario_AC10_RollbackPathHelper(t *testing.T) {
+	if got := RollbackPath("/usr/local/bin/mdmagent"); got != "/usr/local/bin/mdmagent.update-rollback" {
+		t.Errorf("RollbackPath = %q", got)
+	}
+	if RollbackSuffix != ".update-rollback" {
+		t.Errorf("RollbackSuffix = %q, want %q", RollbackSuffix, ".update-rollback")
 	}
 }

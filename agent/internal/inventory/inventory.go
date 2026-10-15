@@ -35,6 +35,12 @@ const (
 	ProbeOS       = "os"
 	ProbeDisk     = "disk"
 	ProbeSoftware = "software"
+
+	// ProbeDetails is the Windows-only device-details probe. Besides the
+	// usual "details" and "details:timeout" warnings, a section of its script
+	// that fails is reported as "details:<section>" and output that is not a
+	// single JSON object as "details:unparseable".
+	ProbeDetails = "details"
 )
 
 // ProbeTimeout is how long a single probe may take. It is measured on the
@@ -91,7 +97,7 @@ func Collect(runner platform.CommandRunner, clock platform.Clock, goos string) (
 	stdout, warnings := runProbes(runner, clock, probes)
 	switch goos {
 	case "windows":
-		fillWindows(&inv, stdout)
+		warnings = append(warnings, fillWindows(&inv, stdout)...)
 	case "darwin":
 		fillDarwin(&inv, stdout)
 	}
@@ -159,8 +165,14 @@ func runProbes(runner platform.CommandRunner, clock platform.Clock, probes []Pro
 	return stdout, warnings
 }
 
-// cleanSoftware drops entries with a blank name and keeps the first of any
-// entries sharing a name and version, preserving probe order.
+// UnknownVersion is the version sent for software the OS lists without one.
+// The contract requires a non-empty version on every entry, and the backend
+// refuses the whole check-in -- posture included -- over a single blank one.
+const UnknownVersion = "unknown"
+
+// cleanSoftware drops entries with a blank name, gives a blank version
+// UnknownVersion, and keeps the first of any entries sharing a name and
+// version, preserving probe order.
 func cleanSoftware(entries []contract.SoftwareEntry) []contract.SoftwareEntry {
 	cleaned := make([]contract.SoftwareEntry, 0, len(entries))
 	seen := make(map[string]bool, len(entries))
@@ -168,6 +180,10 @@ func cleanSoftware(entries []contract.SoftwareEntry) []contract.SoftwareEntry {
 		e.Name = strings.TrimSpace(e.Name)
 		if e.Name == "" {
 			continue
+		}
+		e.Version = strings.TrimSpace(e.Version)
+		if e.Version == "" {
+			e.Version = UnknownVersion
 		}
 		key := e.Name + "\x00" + e.Version
 		if seen[key] {

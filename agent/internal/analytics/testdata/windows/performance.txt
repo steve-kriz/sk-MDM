@@ -1,0 +1,5 @@
+cpuPercent=12
+memoryTotalBytes=17179869184
+memoryUsedBytes=9663676416
+diskTotalBytes=511101108224
+diskFreeBytes=214748364800

@@ -31,19 +31,23 @@ export interface RouteRequest extends RouterRequest {
  * script -- returns `rawBody` instead: that string is passed through
  * untouched, and the response carries exactly the headers the route named,
  * with no JSON content-type merged in. `rawBody` wins when both are present.
+ * A binary `rawBody` (an image) is base64 with `isBase64Encoded: true`, which
+ * is carried through to the Function URL response unchanged.
  */
 export interface RouteResult {
   statusCode: number;
   headers?: Record<string, string>;
   body?: unknown;
   rawBody?: string;
+  isBase64Encoded?: boolean;
 }
 
-/** What `handle()` returns: an HTTP response with a JSON string body. */
+/** What `handle()` returns: an HTTP response with a string body, base64 when `isBase64Encoded`. */
 export interface RouterResponse {
   statusCode: number;
   headers: Record<string, string>;
   body: string;
+  isBase64Encoded?: boolean;
 }
 
 export type RouteHandler = (request: RouteRequest) => RouteResult | Promise<RouteResult>;
@@ -110,6 +114,7 @@ function routeResponse(result: RouteResult): RouterResponse {
       statusCode: result.statusCode,
       headers: { ...(result.headers ?? {}) },
       body: result.rawBody,
+      ...(result.isBase64Encoded === true ? { isBase64Encoded: true } : {}),
     };
   }
   return jsonResponse(result.statusCode, result.body, result.headers);

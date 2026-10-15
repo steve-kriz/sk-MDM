@@ -7,6 +7,8 @@
  *   GET /assets/{file}        -- its stylesheet and browser modules
  *   GET /assets/views/{file}  -- the per-screen view modules
  *   GET /admin/config.json    -- the public client configuration
+ *   GET /applications         -- the signed-in Applications page (TASK-049)
+ *   GET /applications/config.json -- its public client configuration
  *
  *   registerUiRoutes(router);
  *
@@ -43,7 +45,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { RouteRequest, RouteResult, Router } from '../http/router.js';
-import { adminClientConfig, publicHost } from './config.js';
+import { adminClientConfig, publicHost, userClientConfig } from './config.js';
 
 /** Path of the public landing page. */
 export const INDEX_PATH = '/';
@@ -63,6 +65,15 @@ export const VIEW_ASSET_PATH = '/assets/views/{file}';
 /** Path of the public client configuration. */
 export const CONFIG_PATH = '/admin/config.json';
 
+/** Path of the signed-in Applications page. */
+export const APPLICATIONS_PATH = '/applications';
+
+/** Path of the Applications page's public client configuration. */
+export const APPLICATIONS_CONFIG_PATH = '/applications/config.json';
+
+/** The file `GET /applications` answers with: the Applications page shell. */
+export const APPLICATIONS_FILE = 'applications.html';
+
 /** The file `GET /admin` answers with: the console shell. */
 export const INDEX_FILE = 'index.html';
 
@@ -80,7 +91,12 @@ export const CONTENT_TYPES: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.js': 'application/javascript; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
 };
+
+/** The extensions whose files are binary: read as bytes and answered base64. */
+const BINARY_EXTENSIONS: ReadonlySet<string> = new Set(['.png']);
 
 /**
  * The headers every page and script response carries.
@@ -88,11 +104,12 @@ export const CONTENT_TYPES: Record<string, string> = {
  * `default-src 'self'` is the whole point: the console loads no third-party
  * script and no inline one. `connect-src` additionally names Entra's own
  * endpoint, which is where -- and the only place where -- the browser exchanges
- * its authorization code.
+ * its authorization code -- and `https://*.amazonaws.com`, the presigned S3 URL
+ * the console PUTs an application installer to (TASK-049).
  */
 export const SECURITY_HEADERS: Record<string, string> = {
   'content-security-policy':
-    "default-src 'self'; connect-src 'self' https://login.microsoftonline.com; img-src 'self' data:; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
+    "default-src 'self'; connect-src 'self' https://login.microsoftonline.com https://*.amazonaws.com; img-src 'self' data:; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
 };
@@ -123,7 +140,10 @@ function extensionOf(name: string): string {
   return dot === -1 ? '' : name.slice(dot).toLowerCase();
 }
 
-/** The contents of a shipped file, or `null` when nothing of that name shipped. */
+/**
+ * The contents of a shipped file, or `null` when nothing of that name shipped:
+ * UTF-8 text, or base64 for a binary extension.
+ */
 function readAsset(directory: string, name: string): string | null {
   if (!ASSET_NAME.test(name) || !(SHIPPED[directory] ?? new Set<string>()).has(name)) {
     return null;
@@ -135,7 +155,8 @@ function readAsset(directory: string, name: string): string | null {
   }
   let text: string;
   try {
-    text = readFileSync(join(directory, name), 'utf8');
+    const path = join(directory, name);
+    text = BINARY_EXTENSIONS.has(extensionOf(name)) ? readFileSync(path).toString('base64') : readFileSync(path, 'utf8');
   } catch {
     return null;
   }
@@ -162,6 +183,7 @@ export function serveAsset(directory: string, name: string): RouteResult {
     statusCode: 200,
     headers: { 'content-type': contentType, ...SECURITY_HEADERS },
     rawBody: text,
+    ...(BINARY_EXTENSIONS.has(extensionOf(name)) ? { isBase64Encoded: true } : {}),
   };
 }
 
@@ -190,12 +212,29 @@ export function handleConfig(request: RouteRequest): RouteResult {
   return { statusCode: 200, body: config };
 }
 
+/** `GET /applications` -- the Applications page shell; its data comes from bearer-protected APIs. */
+export function handleApplications(): RouteResult {
+  return serveAsset(PUBLIC_DIR, APPLICATIONS_FILE);
+}
+
+/** `GET /applications/config.json` -- the public values the Applications page needs to sign in. */
+export function handleApplicationsConfig(request: RouteRequest): RouteResult {
+  const host = publicHost(process.env, request.headers?.host ?? '');
+  const config = userClientConfig(process.env, host);
+  if (config === null) {
+    return { statusCode: 500, body: { error: 'not_configured' } };
+  }
+  return { statusCode: 200, body: config };
+}
+
 /** Register the console's routes on a router. Returns the router, so calls chain. */
 export function registerUiRoutes(router: Router): Router {
   router.add('GET', INDEX_PATH, () => handleIndex());
   router.add('GET', ADMIN_PATH, () => handleAdmin());
   router.add('GET', ASSET_PATH, (request) => serveAsset(PUBLIC_DIR, request.params.file ?? ''));
   router.add('GET', PUBLIC_ASSET_PATH, (request) => serveAsset(PUBLIC_DIR, request.params.file ?? ''));
+  router.add('GET', APPLICATIONS_PATH, () => handleApplications());
+  router.add('GET', APPLICATIONS_CONFIG_PATH, (request) => handleApplicationsConfig(request));
   router.add('GET', VIEW_ASSET_PATH, (request) => serveAsset(VIEWS_DIR, request.params.file ?? ''));
   return router.add('GET', CONFIG_PATH, (request) => handleConfig(request));
 }

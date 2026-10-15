@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const { createUserTokenVerifier, AGENT_SCOPE_NAME } = await import(
+const { createUserTokenVerifier, createAppUserTokenVerifier, AGENT_SCOPE_NAME, APP_USER_SCOPE_NAME } = await import(
   `file://${join(__dirname, '../../dist/auth/userToken.js')}`
 );
 
@@ -521,5 +521,118 @@ test('B3: JWKS fetcher rejection is 503 jwks_unavailable', async (t) => {
 // ==================== B4 REGRESSION TEST ====================
 
 test('B4: AGENT_SCOPE_NAME constant equals MDM.Agent', async (t) => {
+  assert.strictEqual(AGENT_SCOPE_NAME, 'MDM.Agent');
+});
+
+// ==================== TASK-049 AC9: createAppUserTokenVerifier (MDM.User) ====================
+
+function createAppToken(now, overrides = {}) {
+  return {
+    iss: `https://login.microsoftonline.com/${TENANT_ID}/v2.0`,
+    aud: CLIENT_ID,
+    exp: now + 3600,
+    nbf: now - 60,
+    scp: 'openid MDM.User',
+    tid: TENANT_ID,
+    oid: 'u-1',
+    ...overrides,
+  };
+}
+
+function signedAppToken(now, privateKey, kid, overrides = {}) {
+  return signJwt({ alg: 'RS256', kid }, createAppToken(now, overrides), privateKey);
+}
+
+test('Scenario: User token with MDM.User is accepted', async () => {
+  // Given a valid token for the configured tenant and audience with
+  // scp "openid MDM.User" and oid "u-1"
+  const { publicKey, privateKey } = generateKeyPair();
+  const kid = 'k1';
+  const mockFetcher = createMockFetcher({ keys: [exportPublicKeyAsJwk(publicKey, kid)] });
+  const now = 1000000;
+  const token = signedAppToken(now, privateKey, kid);
+
+  const verifier = createAppUserTokenVerifier({
+    tenantId: TENANT_ID,
+    clientId: CLIENT_ID,
+    jwksFetcher: mockFetcher.fetcher,
+    now: () => now,
+  });
+
+  // When createAppUserTokenVerifier verifies it
+  const claims = await verifier.verify(token);
+
+  // Then the claims are returned
+  assert.strictEqual(claims.oid, 'u-1');
+  assert.strictEqual(claims.tid, TENANT_ID);
+});
+
+const appUserRejections = [
+  { label: 'with scp "MDM.Admin" only', overrides: { scp: 'MDM.Admin' }, status: 403, error: 'missing_scope' },
+  { label: 'with scp "MDM.Users"', overrides: { scp: 'MDM.Users' }, status: 403, error: 'missing_scope' },
+  {
+    label: "with scp \"MDM.User\" and another tenant's tid",
+    overrides: { tid: 'other-tenant' },
+    status: 401,
+    error: 'invalid_subject',
+  },
+  { label: 'with scp "MDM.User" and no oid', overrides: { oid: '' }, status: 401, error: 'invalid_subject' },
+  { label: 'with the wrong audience', overrides: { aud: 'someone-else' }, status: 401, error: 'invalid_audience' },
+];
+
+for (const { label, overrides, status, error } of appUserRejections) {
+  test(`Scenario Outline: User token rejected -- ${label}`, async () => {
+    const { publicKey, privateKey } = generateKeyPair();
+    const kid = 'k1';
+    const mockFetcher = createMockFetcher({ keys: [exportPublicKeyAsJwk(publicKey, kid)] });
+    const now = 1000000;
+    const token = signedAppToken(now, privateKey, kid, overrides);
+
+    const verifier = createAppUserTokenVerifier({
+      tenantId: TENANT_ID,
+      clientId: CLIENT_ID,
+      jwksFetcher: mockFetcher.fetcher,
+      now: () => now,
+    });
+
+    await assert.rejects(
+      () => verifier.verify(token),
+      (err) => {
+        assert.ok(isVerifyFailure(err));
+        assert.strictEqual(err.status, status, label);
+        assert.strictEqual(err.error, error, label);
+        return true;
+      },
+    );
+  });
+}
+
+test('Scenario Outline: User token rejected -- that has expired', async () => {
+  const { publicKey, privateKey } = generateKeyPair();
+  const kid = 'k1';
+  const mockFetcher = createMockFetcher({ keys: [exportPublicKeyAsJwk(publicKey, kid)] });
+  const now = 1000000;
+  const token = signJwt({ alg: 'RS256', kid }, createAppToken(now, { exp: now - 1000 }), privateKey);
+
+  const verifier = createAppUserTokenVerifier({
+    tenantId: TENANT_ID,
+    clientId: CLIENT_ID,
+    jwksFetcher: mockFetcher.fetcher,
+    now: () => now,
+  });
+
+  await assert.rejects(
+    () => verifier.verify(token),
+    (err) => {
+      assert.ok(isVerifyFailure(err));
+      assert.strictEqual(err.status, 401);
+      assert.strictEqual(err.error, 'token_expired');
+      return true;
+    },
+  );
+});
+
+test('Unit: APP_USER_SCOPE_NAME is MDM.User and createUserTokenVerifier (MDM.Agent) is unaffected', () => {
+  assert.strictEqual(APP_USER_SCOPE_NAME, 'MDM.User');
   assert.strictEqual(AGENT_SCOPE_NAME, 'MDM.Agent');
 });

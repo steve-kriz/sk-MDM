@@ -1,0 +1,13 @@
+{
+  "collectedAt": "2026-10-11T11:59:58Z",
+  "performance": {
+    "cpuPercent": 12.5,
+    "memoryUsedBytes": 9663676416,
+    "memoryTotalBytes": 34359738368,
+    "systemDiskFreeBytes": 210453397504,
+    "systemDiskTotalBytes": 1023741952000
+  },
+  "warnings": [
+    "performance: cpu sample took longer than expected"
+  ]
+}

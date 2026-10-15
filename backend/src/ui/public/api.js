@@ -4,6 +4,7 @@
  *   setToken(accessToken);
  *   const page = await request('/devices');          // GET /admin/api/v1/devices
  *   await request('/groups', {method: 'POST', body: {name: 'Sydney'}});
+ *   await put('/policies/pol-1', {name, settings});  // likewise post() and del()
  *
  * One module owns the access token so there is exactly one place it can be
  * read from, refreshed, or thrown away. It lives in a module-level variable
@@ -176,6 +177,11 @@ export function get(path, query) {
 /** `POST` a JSON body. */
 export function post(path, body) {
   return request(path, { method: 'POST', body });
+}
+
+/** `PUT` a JSON body: replace a resource. */
+export function put(path, body) {
+  return request(path, { method: 'PUT', body });
 }
 
 /** `DELETE`, with the JSON body the assignment routes read their `groupId` from. */

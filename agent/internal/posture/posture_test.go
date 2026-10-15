@@ -599,6 +599,51 @@ func TestScenario_ActiveThirdPartyAntivirusSatisfiesEnabled(t *testing.T) {
 	}
 }
 
+// TestScenario_AC1_RealTimeProtectionOffCountsAsDisabled covers the new
+// antivirus-realtime-off.txt fixture (TASK-055): AntivirusEnabled=True with
+// RealTimeProtectionEnabled=False must still print enabled=False, since the
+// probe script ANDs the two booleans together.
+func TestScenario_AC1_RealTimeProtectionOffCountsAsDisabled(t *testing.T) {
+	// Given the Windows antivirus probe printed the fixture
+	// "antivirus-realtime-off.txt"
+	runner := buildWindowsRunner(t, filepath.Join("testdata", "windows", "antivirus-realtime-off.txt"))
+	clock := fake.NewClock(time.Now())
+
+	// When posture is collected for goos "windows"
+	pos, err := posture.Collect(runner, clock, "windows")
+	if err != nil {
+		t.Fatalf("Collect failed: %v", err)
+	}
+
+	// Then posture.antivirus.enabled is false
+	if pos.Antivirus.Enabled {
+		t.Error("antivirus.enabled should be false when real-time protection is off")
+	}
+	// And posture.antivirus.name is "Microsoft Defender"
+	if pos.Antivirus.Name != "Microsoft Defender" {
+		t.Errorf("antivirus.name = %q, want Microsoft Defender", pos.Antivirus.Name)
+	}
+	if pos.Antivirus.DefinitionsAgeDays != 1 {
+		t.Errorf("antivirus.definitionsAgeDays = %d, want 1", pos.Antivirus.DefinitionsAgeDays)
+	}
+}
+
+// TestScenario_AC1_ProbeScriptCombinesAntivirusEnabledAndRealTime covers the
+// exact enabled= line text AC1 requires.
+func TestScenario_AC1_ProbeScriptCombinesAntivirusEnabledAndRealTime(t *testing.T) {
+	var antivirusProbe posture.Probe
+	for _, p := range posture.Probes("windows") {
+		if p.Name == posture.ProbeAntivirus {
+			antivirusProbe = p
+		}
+	}
+	script := antivirusProbe.Args[len(antivirusProbe.Args)-1]
+	want := "enabled=$([bool]$s.AntivirusEnabled -and [bool]$s.RealTimeProtectionEnabled)"
+	if !strings.Contains(script, want) {
+		t.Errorf("script should contain %q, got %q", want, script)
+	}
+}
+
 // TestScenario_InactiveOrMalformedProductLinesDoNotCountAsActive covers every
 // product line that must not flip antivirus.enabled to true.
 func TestScenario_InactiveOrMalformedProductLinesDoNotCountAsActive(t *testing.T) {

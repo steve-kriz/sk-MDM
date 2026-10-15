@@ -1,0 +1,3 @@
+{"eventId":1000,"occurredAt":"2026-10-02T06:58:12.2500000Z","appName":"OUTLOOK.EXE","appVersion":"16.0.17928.20156"}
+{"eventId":1002,"occurredAt":"2026-10-01T15:04:37.1180000Z","appName":"ms-teams.exe","appVersion":"24277.3502.3161.3007"}
+{"eventId":1000,"occurredAt":"2026-09-28T09:12:03.0040000Z","appName":"EXCEL.EXE","appVersion":"16.0.17928.20156"}

@@ -55,7 +55,7 @@ function createBaseToken(now, overrides = {}) {
     aud: CLIENT_ID,
     exp: now + 3600,
     nbf: now - 60,
-    roles: ['MDM.Admin'],
+    roles: ['MDM.Administrator'],
     oid: 'object-123',
     ...overrides,
   };
@@ -81,7 +81,7 @@ function createMockFetcher(jwks) {
 // ==================== E2E / INTEGRATION TESTS ====================
 
 test('Scenario: Valid admin token is accepted', async (t) => {
-  // Given a token signed with a key in the JWKS and roles containing MDM.Admin
+  // Given a token signed with a key in the JWKS and roles containing MDM.Administrator
   const { publicKey, privateKey } = generateKeyPair();
   const kid = 'key-1';
   const jwk = exportPublicKeyAsJwk(publicKey, kid);
@@ -311,7 +311,7 @@ test('Scenario: Group membership without configured adminGroupId grants nothing'
 
   const now = 1000000;
 
-  // And a valid token with no MDM.Admin role and groups ["g-123"]
+  // And a valid token with no MDM.Administrator role and groups ["g-123"]
   const header = { alg: 'RS256', kid };
   const payload = createBaseToken(now, {
     roles: [],
@@ -723,7 +723,7 @@ test('Unit: Token with both roles and groups, only roles grants admin', async (t
   const now = 1000000;
   const header = { alg: 'RS256', kid };
   const payload = createBaseToken(now, {
-    roles: ['MDM.Admin'], // Admin
+    roles: ['MDM.Administrator'], // Admin
     groups: ['g-users'], // Not admin
   });
   const token = signJwt(header, payload, privateKey);
@@ -883,7 +883,7 @@ test('Unit: Roles as non-array is handled safely', async (t) => {
   const now = 1000000;
   const header = { alg: 'RS256', kid };
   const payload = createBaseToken(now, {
-    roles: 'MDM.Admin', // Not an array
+    roles: 'MDM.Administrator', // Not an array
   });
   const token = signJwt(header, payload, privateKey);
 
@@ -928,4 +928,31 @@ test('Unit: Groups containing non-string entries is filtered', async (t) => {
 
   const claims = await verifier.verify(token);
   assert.ok(claims); // Should resolve because g-admin is in the filtered list
+});
+
+test('Unit: ADMIN_ROLE is MDM.Administrator, distinct from the MDM.Admin scope', async (t) => {
+  // Entra keeps app-role and exposed-scope values in one namespace, so the
+  // admin role cannot reuse the console's sign-in scope name.
+  assert.strictEqual(ADMIN_ROLE, 'MDM.Administrator');
+});
+
+test('Scenario: A token whose only role is the scope name MDM.Admin is not an admin', async (t) => {
+  const { publicKey, privateKey } = generateKeyPair();
+  const kid = 'key-1';
+  const mockFetcher = createMockFetcher({ keys: [exportPublicKeyAsJwk(publicKey, kid)] });
+  const now = 1000000;
+  const token = signJwt({ alg: 'RS256', kid }, createBaseToken(now, { roles: ['MDM.Admin'] }), privateKey);
+  const verifier = createTokenVerifier({
+    tenantId: TENANT_ID,
+    clientId: CLIENT_ID,
+    jwksFetcher: mockFetcher.fetcher,
+    now: () => now,
+  });
+
+  await assert.rejects(verifier.verify(token), (error) => {
+    assert.ok(isVerifyFailure(error));
+    assert.strictEqual(error.status, 403);
+    assert.strictEqual(error.error, 'not_admin');
+    return true;
+  });
 });

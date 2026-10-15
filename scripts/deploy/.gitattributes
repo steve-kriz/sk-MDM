@@ -1,0 +1,4 @@
+# Deploy scripts run under bash on macOS and Linux, where a CR at the end of a
+# line breaks the shebang and every command. Keep them LF on checkout whatever a
+# Windows clone's core.autocrlf is set to.
+*.sh text eol=lf

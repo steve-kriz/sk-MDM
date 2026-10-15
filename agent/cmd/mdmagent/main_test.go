@@ -77,10 +77,10 @@ func TestScenario_ShowRedactsSecrets(t *testing.T) {
 
 	// Create config with token
 	cfg := config.Config{
-		CollectionURL:         "https://x.example/",
-		EnrollmentToken:       "secret-token-12345",
+		CollectionURL:          "https://x.example/",
+		EnrollmentToken:        "secret-token-12345",
 		CheckInIntervalSeconds: 900,
-		LogLevel:              "info",
+		LogLevel:               "info",
 	}
 	cfgPath := config.Path("darwin")
 	config.Save(fsys, cfgPath, cfg)
@@ -138,10 +138,10 @@ func TestScenario_ShowNotEnrolled(t *testing.T) {
 
 	// Create config without state (not enrolled)
 	cfg := config.Config{
-		CollectionURL:         "https://x.example/",
-		EnrollmentToken:       "token",
+		CollectionURL:          "https://x.example/",
+		EnrollmentToken:        "token",
 		CheckInIntervalSeconds: 900,
-		LogLevel:              "info",
+		LogLevel:               "info",
 	}
 	config.Save(fsys, config.Path("darwin"), cfg)
 
@@ -197,10 +197,10 @@ func TestCLI_ShowWithConfigPath(t *testing.T) {
 	customStatePath := "/custom/state.json"
 
 	cfg := config.Config{
-		CollectionURL:         "https://custom.example/",
-		EnrollmentToken:       "token",
+		CollectionURL:          "https://custom.example/",
+		EnrollmentToken:        "token",
 		CheckInIntervalSeconds: 900,
-		LogLevel:              "info",
+		LogLevel:               "info",
 	}
 	cfgData, _ := json.MarshalIndent(cfg, "", "  ")
 	fsys.Seed(customConfigPath, append(cfgData, '\n'))
@@ -383,10 +383,10 @@ func TestCLI_ShowPrintsAllFields(t *testing.T) {
 	fsys := fake.NewFS()
 
 	cfg := config.Config{
-		CollectionURL:         "https://example.com/api",
-		EnrollmentToken:       "token-abc",
+		CollectionURL:          "https://example.com/api",
+		EnrollmentToken:        "token-abc",
 		CheckInIntervalSeconds: 600,
-		LogLevel:              "warn",
+		LogLevel:               "warn",
 	}
 	config.Save(fsys, config.Path("darwin"), cfg)
 

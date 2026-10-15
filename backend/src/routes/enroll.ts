@@ -1,28 +1,54 @@
 /**
  * `POST /api/v1/enroll` -- the one route that issues a device its identity.
  *
- * Enroll is authenticated by the enrollment token alone, carried over TLS in
- * `X-MDM-Enrollment-Token` as `<tokenId>.<secret>`. It never calls
+ * Enroll accepts one credential: the enrollment token. It never calls
  * `verifyDeviceRequest` and never looks at the device HMAC headers: at enroll
  * time the agent has no device id and no device secret, so there is nothing to
- * sign with (see `src/http/deviceAuth.ts`).
+ * sign with (see `src/http/deviceAuth.ts`). An `Authorization` header is
+ * ignored (spec Amendment B removed bearer enrollment: the signed-in user's
+ * Entra token instead mints a single-use enrollment token, see
+ * `src/routes/agentEnrollmentToken.ts`).
  *
  *   router.add('POST', ENROLL_PATH, createEnrollHandler({ table, pepper }));
  *
- * `tokenId` locates the stored token record and the SHA-256 of the *whole*
- * presented header value is compared, in constant time, against the stored
- * `tokenHash`. The checks run in a fixed order, each returning immediately:
+ * **The enrollment token**, carried over TLS in
+ * `X-MDM-Enrollment-Token` as `<tokenId>.<secret>`. `tokenId` locates the
+ * stored token record and the SHA-256 of the *whole* presented header value is
+ * compared, in constant time, against the stored `tokenHash`. The checks run
+ * in a fixed order, each returning immediately:
  *
  *   1. header shape        -> 401 invalid_enrollment_token (nothing is read)
  *   2. record found + hash -> 401 invalid_enrollment_token
+ *   2b. not revoked        -> 403 enrollment_token_revoked
  *   3. not expired         -> 403 enrollment_token_expired
  *   4. uses remaining      -> 403 enrollment_token_exhausted
  *   5. body valid          -> 400 invalid_request, naming every bad field
  *   6. use count claimed   -> 403 enrollment_token_exhausted (lost the race)
  *
- * The use count is claimed with a conditional update *before* anything is
- * written, so a refused enrollment leaves no device, pointer or audit item
- * behind.
+ * A request without the header fails step 1. The use count is claimed
+ * with a conditional update *before* anything is written, so a refused
+ * enrollment leaves no device, pointer or audit item behind. The claim's
+ * condition also requires the token to be unrevoked, so a token revoked
+ * between the read and the claim is refused there.
+ *
+ * Every successful enroll records which token enrolled the device:
+ * `enrollmentTokenId` on the profile, and the device id appended once to the
+ * token record's `deviceIds` list. A re-bind carries the profile's
+ * `status`, `disabledAt` and `disabledBy` forward, so re-enrolling never
+ * lifts an admin disable.
+ *
+ * A token minted by the agent sign-in carries `enrolledBy = {oid, upn, name}`
+ * on its record; it is copied onto the device profile and `enrolledByUpn` into
+ * the audit detail. An admin-minted token carries none.
+ *
+ * The body's optional `ownership` is `"officehq"` or `"byoc"`; absent reads as
+ * `"officehq"` and anything else is a bad field. It is recorded on the profile
+ * and in the audit entry, and the device joins every group that auto-assigns
+ * that ownership (`applyAutoAssignGroups`, `src/admin/groups.ts`): each
+ * membership is written and the ids are added to the audit detail as
+ * `autoAssignGroupIds`; a failure there never fails the enrollment. On a
+ * re-bind `ownership` is always the new enrollment's value; `enrolledBy` is
+ * overwritten when the token carries one and otherwise left as carried.
  *
  * A machine that re-enrolls is recognised by its hardware uuid: the
  * `deviceByHardware` pointer item holds the device id the uuid was first bound
@@ -40,17 +66,33 @@
 import { createHash, randomBytes as cryptoRandomBytes, timingSafeEqual } from 'node:crypto';
 import { appendAudit, isoUtc, toUtcDate, type AuditClock, type AuditInstant } from '../audit.js';
 import { DEFAULT_CHECKIN_INTERVAL_SECONDS } from '../config/intervals.js';
-import type { EnrollResponse } from '../contract/types.js';
+import type { EnrollResponse, Ownership } from '../contract/types.js';
+import { applyAutoAssignGroups } from '../admin/groups.js';
 import { encryptDeviceSecret } from '../crypto/deviceSecret.js';
+import { deviceEventGroupName, recordDeviceEvent } from '../deviceEvents.js';
 import { deviceByHardware, deviceListIndex, deviceProfile, enrollmentToken, type TableKey } from '../db/keys.js';
-import { CONDITIONAL_CHECK_FAILED, type Item, type RequestFields, type WriteOutcome } from '../db/table.js';
+import {
+  CONDITIONAL_CHECK_FAILED,
+  type Item,
+  type QueryPage,
+  type QueryRequest,
+  type RequestFields,
+  type WriteOutcome,
+} from '../db/table.js';
 import type { RouteHandler, RouteRequest, RouteResult, Router } from '../http/router.js';
+import { captureLocation } from '../location/capture.js';
 
 /** Path this route is registered on. */
 export const ENROLL_PATH = '/api/v1/enroll';
 
 /** The enrollment token header, lower-cased; lookups are case-insensitive. */
 export const ENROLLMENT_TOKEN_HEADER = 'x-mdm-enrollment-token';
+
+/** What an absent `ownership` reads as. */
+export const DEFAULT_OWNERSHIP: Ownership = 'officehq';
+
+/** The ownership values the contract allows. */
+export const OWNERSHIP_VALUES: readonly Ownership[] = ['officehq', 'byoc'];
 
 /** Length of an issued device secret, in bytes (64 hex characters). */
 export const DEVICE_SECRET_BYTES = 32;
@@ -79,6 +121,7 @@ export interface EnrollTable {
   put(item: Item): Promise<void>;
   putIfAbsent(item: Item): Promise<WriteOutcome>;
   update(key: TableKey, fields?: RequestFields): Promise<Item | undefined>;
+  query(request?: QueryRequest): Promise<QueryPage>;
 }
 
 /** The pepper key, or anything that resolves it (a `PepperProvider` fits). */
@@ -95,6 +138,13 @@ export interface EnrollDependencies {
   randomBytes?: (size: number) => Buffer;
 }
 
+/** Who enrolled a device, as a sign-in-minted token record carries it. */
+export interface EnrolledBy {
+  oid: string;
+  upn: string | null;
+  name: string | null;
+}
+
 /** Dependencies, or something that resolves them when the first request arrives. */
 export type EnrollDependencySource =
   | EnrollDependencies
@@ -106,6 +156,9 @@ interface TokenRecord extends Item {
   expiresAt?: unknown;
   maxUses?: unknown;
   useCount?: unknown;
+  enrolledBy?: unknown;
+  revokedAt?: unknown;
+  deviceIds?: unknown;
 }
 
 /** A validated enroll body. */
@@ -115,6 +168,7 @@ interface EnrollBody {
   osVersion: string;
   hardwareUuid: string;
   agentVersion: string;
+  ownership: Ownership;
 }
 
 function failure(statusCode: number, error: string, extra?: Record<string, unknown>): RouteResult {
@@ -129,6 +183,28 @@ function headerValue(headers: RouteRequest['headers'] | undefined, name: string)
     }
   }
   return '';
+}
+
+/** A non-empty string, or `null`. */
+function stringOrNull(value: unknown): string | null {
+  return typeof value === 'string' && value.length > 0 ? value : null;
+}
+
+/**
+ * The `enrolledBy` a token record carries, reduced to `{oid, upn, name}`, or
+ * `null` when the record has none (an admin-minted token) or it has no oid.
+ */
+function enrolledByOf(record: TokenRecord): EnrolledBy | null {
+  const value = record.enrolledBy;
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return null;
+  }
+  const carried = value as Record<string, unknown>;
+  const oid = stringOrNull(carried.oid);
+  if (oid === null) {
+    return null;
+  }
+  return { oid, upn: stringOrNull(carried.upn), name: stringOrNull(carried.name) };
 }
 
 /**
@@ -195,10 +271,15 @@ function readBody(raw: string | null): { body: EnrollBody } | { fields: string[]
       fields.push(name);
     }
   }
+  // Optional: absent reads as the default; anything present must be allowed.
+  const ownership = candidate.ownership === undefined ? DEFAULT_OWNERSHIP : candidate.ownership;
+  if (!OWNERSHIP_VALUES.includes(ownership as Ownership)) {
+    fields.push('ownership');
+  }
   if (fields.length > 0) {
     return { fields };
   }
-  return { body: candidate as unknown as EnrollBody };
+  return { body: { ...(candidate as unknown as EnrollBody), ownership: ownership as Ownership } };
 }
 
 /** True when the token's `expiresAt` is at or before now. */
@@ -242,8 +323,12 @@ export function createEnrollHandler(source: EnrollDependencySource): RouteHandle
   }
 
   return async function handleEnroll(req: RouteRequest): Promise<RouteResult> {
-    const { table, pepper, now = (): Date => new Date(), randomBytes = cryptoRandomBytes } =
-      await dependencies();
+    const {
+      table,
+      pepper,
+      now = (): Date => new Date(),
+      randomBytes = cryptoRandomBytes,
+    } = await dependencies();
 
     // 1. The token's shape, before anything is read.
     const presented = headerValue(req?.headers, ENROLLMENT_TOKEN_HEADER);
@@ -256,6 +341,11 @@ export function createEnrollHandler(source: EnrollDependencySource): RouteHandle
     const record = (await table.get(enrollmentToken(split.tokenId))) as TokenRecord | undefined;
     if (record === undefined || record === null || !tokenHashMatches(record.tokenHash, presented)) {
       return failure(401, 'invalid_enrollment_token');
+    }
+
+    // 2b. A revoked token never enrolls again, whatever else is true of it.
+    if (record.revokedAt !== undefined && record.revokedAt !== null) {
+      return failure(403, 'enrollment_token_revoked');
     }
 
     const at = toUtcDate(now);
@@ -276,14 +366,13 @@ export function createEnrollHandler(source: EnrollDependencySource): RouteHandle
     if ('fields' in read) {
       return failure(400, 'invalid_request', { fields: read.fields });
     }
-    const { hostname, platform, osVersion, hardwareUuid, agentVersion } = read.body;
 
     // 6. Claim one use before writing anything, so a token that runs out
     //    between the read above and here leaves no half-made device behind.
     try {
       await table.update(enrollmentToken(split.tokenId), {
         UpdateExpression: 'SET useCount = if_not_exists(useCount, :zero) + :one',
-        ConditionExpression: 'useCount < maxUses',
+        ConditionExpression: 'useCount < maxUses AND attribute_not_exists(revokedAt)',
         ExpressionAttributeValues: { ':zero': 0, ':one': 1 },
       });
     } catch (error) {
@@ -293,73 +382,196 @@ export function createEnrollHandler(source: EnrollDependencySource): RouteHandle
       throw error;
     }
 
-    const lastSeenAt = isoUtc(at);
-    const pointerKey = deviceByHardware(hardwareUuid);
-
-    // The hardware uuid decides whether this is a new device or the same
-    // machine coming back.
-    let deviceId: string;
-    let rebound = true;
-    const pointer = await table.get(pointerKey);
-    if (typeof pointer?.deviceId === 'string' && pointer.deviceId.length > 0) {
-      deviceId = pointer.deviceId;
-    } else {
-      const candidate = `${DEVICE_ID_PREFIX}${randomBytes(DEVICE_ID_BYTES).toString('hex')}`;
-      const outcome = await table.putIfAbsent({ ...pointerKey, deviceId: candidate, createdAt: lastSeenAt });
-      if (outcome?.written) {
-        deviceId = candidate;
-        rebound = false;
-      } else {
-        // Another agent enrolled this machine first: use its device rather
-        // than creating a second one.
-        const winner = await table.get(pointerKey);
-        deviceId =
-          typeof winner?.deviceId === 'string' && winner.deviceId.length > 0 ? winner.deviceId : candidate;
-      }
-    }
-
-    // A fresh secret every time, stored only as ciphertext bound to this device.
-    const deviceSecret = randomBytes(DEVICE_SECRET_BYTES).toString('hex');
-    const secretEnc = encryptDeviceSecret(deviceSecret, await resolvePepper(pepper), deviceId);
-
-    // On a re-bind the existing profile is carried forward so attributes other
-    // tickets own (status, group, posture) survive re-enrollment; `secretEnc`
-    // is replaced, which stops the previous secret verifying.
-    const profileKey = deviceProfile(deviceId);
-    const carried: Item = { ...((rebound ? await table.get(profileKey) : undefined) ?? {}) };
-    // The secret is never stored as a hash, so an item carrying one is stale.
-    delete carried.secretHash;
-    await table.put({
-      ...carried,
-      ...profileKey,
-      ...deviceListIndex(lastSeenAt),
-      deviceId,
-      hostname,
-      platform,
-      osVersion,
-      hardwareUuid,
-      agentVersion,
-      secretEnc,
-      lastSeenAt,
-      enrolledAt: typeof carried.enrolledAt === 'string' ? carried.enrolledAt : lastSeenAt,
-    });
-
-    await appendAudit(table, {
-      action: 'device.enrolled',
-      actor: `device:${deviceId}`,
-      target: deviceId,
-      detail: { hardwareUuid, platform, agentVersion },
-      now: at,
-    });
-
-    const body: EnrollResponse = {
-      deviceId,
-      deviceSecret,
-      checkInIntervalSeconds: DEFAULT_CHECKIN_INTERVAL_SECONDS,
-      serverTime: lastSeenAt,
-    };
-    return { statusCode: 200, body };
+    return enrollDevice(
+      { table, pepper, at, randomBytes, headers: req?.headers },
+      read.body,
+      enrolledByOf(record),
+      { tokenId: split.tokenId, deviceIds: record.deviceIds },
+    );
   };
+}
+
+/** What `enrollDevice` needs once a credential has been accepted. */
+interface EnrollContext {
+  table: EnrollTable;
+  pepper: PepperSource;
+  at: Date;
+  randomBytes: (size: number) => Buffer;
+  /** The request headers, read only for the CloudFront viewer location. */
+  headers?: RouteRequest['headers'];
+}
+
+/** The enrollment token that was accepted, as `enrollDevice` links it to the device. */
+interface AcceptedToken {
+  tokenId: string;
+  /** The record's `deviceIds` as read before the claim. */
+  deviceIds: unknown;
+}
+
+/**
+ * Add the device to the token record's `deviceIds` list, at most once. A
+ * device already listed on the read record is not written again, and the
+ * condition keeps a concurrent enroll of the same device from appending it
+ * twice; losing that race is not an error.
+ */
+async function linkTokenToDevice(table: EnrollTable, token: AcceptedToken, deviceId: string): Promise<void> {
+  if (Array.isArray(token.deviceIds) && token.deviceIds.includes(deviceId)) {
+    return;
+  }
+  try {
+    await table.update(enrollmentToken(token.tokenId), {
+      UpdateExpression: 'SET #deviceIds = list_append(if_not_exists(#deviceIds, :emptyDeviceIds), :deviceIdList)',
+      ConditionExpression: 'NOT contains(#deviceIds, :deviceId)',
+      ExpressionAttributeNames: { '#deviceIds': 'deviceIds' },
+      ExpressionAttributeValues: { ':emptyDeviceIds': [], ':deviceIdList': [deviceId], ':deviceId': deviceId },
+    });
+  } catch (error) {
+    if (!isConditionalCheckFailure(error)) {
+      throw error;
+    }
+  }
+}
+
+/**
+ * Bind (or re-bind) the device and issue its secret, once a credential and the
+ * body have been accepted. `enrolledBy` is `null` when the token carried none.
+ */
+async function enrollDevice(
+  { table, pepper, at, randomBytes, headers }: EnrollContext,
+  enroll: EnrollBody,
+  enrolledBy: EnrolledBy | null,
+  token: AcceptedToken,
+): Promise<RouteResult> {
+  const { hostname, platform, osVersion, hardwareUuid, agentVersion, ownership } = enroll;
+  const lastSeenAt = isoUtc(at);
+  const pointerKey = deviceByHardware(hardwareUuid);
+
+  // The hardware uuid decides whether this is a new device or the same
+  // machine coming back.
+  let deviceId: string;
+  let rebound = true;
+  const pointer = await table.get(pointerKey);
+  if (typeof pointer?.deviceId === 'string' && pointer.deviceId.length > 0) {
+    deviceId = pointer.deviceId;
+  } else {
+    const candidate = `${DEVICE_ID_PREFIX}${randomBytes(DEVICE_ID_BYTES).toString('hex')}`;
+    const outcome = await table.putIfAbsent({ ...pointerKey, deviceId: candidate, createdAt: lastSeenAt });
+    if (outcome?.written) {
+      deviceId = candidate;
+      rebound = false;
+    } else {
+      // Another agent enrolled this machine first: use its device rather
+      // than creating a second one.
+      const winner = await table.get(pointerKey);
+      deviceId =
+        typeof winner?.deviceId === 'string' && winner.deviceId.length > 0 ? winner.deviceId : candidate;
+    }
+  }
+
+  // A fresh secret every time, stored only as ciphertext bound to this device.
+  const deviceSecret = randomBytes(DEVICE_SECRET_BYTES).toString('hex');
+  const secretEnc = encryptDeviceSecret(deviceSecret, await resolvePepper(pepper), deviceId);
+
+  // On a re-bind the existing profile is carried forward so attributes other
+  // tickets own (status, group, posture) survive re-enrollment -- including an
+  // admin disable (`status`, `disabledAt`, `disabledBy`); `secretEnc`
+  // is replaced, which stops the previous secret verifying.
+  const profileKey = deviceProfile(deviceId);
+  const carried: Item = { ...((rebound ? await table.get(profileKey) : undefined) ?? {}) };
+  // The secret is never stored as a hash, so an item carrying one is stale.
+  delete carried.secretHash;
+  await table.put({
+    ...carried,
+    ...profileKey,
+    ...deviceListIndex(lastSeenAt),
+    deviceId,
+    hostname,
+    platform,
+    osVersion,
+    hardwareUuid,
+    agentVersion,
+    // Always this enrollment's value, re-bind or not.
+    ownership,
+    // A sign-in-minted token names who enrolled the machine; an admin-minted
+    // one leaves whatever the profile carried.
+    ...(enrolledBy === null ? {} : { enrolledBy }),
+    // The token this enrollment presented, re-bind or not.
+    enrollmentTokenId: token.tokenId,
+    secretEnc,
+    lastSeenAt,
+    enrolledAt: typeof carried.enrolledAt === 'string' ? carried.enrolledAt : lastSeenAt,
+  });
+
+  await linkTokenToDevice(table, token, deviceId);
+
+  // The groups that auto-assign this ownership. The token use is already
+  // claimed and `secretEnc` replaced, so a failure here must never fail the
+  // enrollment: it only means no membership is written.
+  let autoAssignGroupIds: string[] = [];
+  try {
+    autoAssignGroupIds = await applyAutoAssignGroups(table, deviceId, ownership, at);
+  } catch {
+    autoAssignGroupIds = [];
+  }
+
+  // The enrollment location (TASK-056): taken whatever the stored capture's
+  // age, but only when the device's policies -- now that its auto-assign groups are
+  // applied -- enable `locationTracking`. Like the default group, a failure
+  // here never fails or changes the enrollment.
+  try {
+    await captureLocation(table, deviceId, headers, at, { force: true });
+  } catch {
+    // Nothing captured; the enrollment answers as it would have.
+  }
+
+  await appendAudit(table, {
+    action: 'device.enrolled',
+    actor: `device:${deviceId}`,
+    target: deviceId,
+    detail: {
+      hardwareUuid,
+      platform,
+      agentVersion,
+      ownership,
+      ...(enrolledBy?.upn ? { enrolledByUpn: enrolledBy.upn } : {}),
+      ...(autoAssignGroupIds.length === 0 ? {} : { autoAssignGroupIds }),
+    },
+    now: at,
+  });
+
+  // The device's History (TASK-067). Never fails the enrollment.
+  await recordDeviceEvent(table, {
+    deviceId,
+    source: 'agent',
+    type: rebound ? 'device.reenrolled' : 'device.enrolled',
+    summary: rebound ? 'Device re-enrolled' : 'Device enrolled',
+    details: {
+      ownership,
+      agentVersion,
+      ...(enrolledBy?.upn ? { enrolledBy: enrolledBy.upn } : {}),
+    },
+    actor: null,
+    occurredAt: at,
+  });
+  for (const groupId of autoAssignGroupIds) {
+    await recordDeviceEvent(table, {
+      deviceId,
+      source: 'system',
+      type: 'group.added',
+      summary: `Auto-assigned to group ${await deviceEventGroupName(table, groupId)}`,
+      details: { groupId, ownership: ownership },
+      actor: null,
+      occurredAt: at,
+    });
+  }
+
+  const body: EnrollResponse = {
+    deviceId,
+    deviceSecret,
+    checkInIntervalSeconds: DEFAULT_CHECKIN_INTERVAL_SECONDS,
+    serverTime: lastSeenAt,
+  };
+  return { statusCode: 200, body };
 }
 
 /** Register the route on a router. Returns the router, so calls chain. */

@@ -1,0 +1,38 @@
+{
+  "collectedAt": "2026-10-14T11:59:58Z",
+  "performance": {
+    "cpuPercent": 12.5,
+    "memoryUsedBytes": 9663676416,
+    "memoryTotalBytes": 34359738368,
+    "systemDiskFreeBytes": 210453397504,
+    "systemDiskTotalBytes": 1023741952000
+  },
+  "network": [
+    {
+      "name": "Ethernet",
+      "linkSpeedBitsPerSecond": 1000000000,
+      "receiveBitsPerSecond": 200000000,
+      "sendBitsPerSecond": 20000000,
+      "utilizationPercent": 20,
+      "packetsReceivedPerSecond": 20000,
+      "packetsSentPerSecond": 5000,
+      "receiveErrors": 0,
+      "sendErrors": 405,
+      "receiveDiscards": 12,
+      "sendDiscards": 0
+    },
+    {
+      "name": "Wi-Fi",
+      "linkSpeedBitsPerSecond": null,
+      "receiveBitsPerSecond": 1200000,
+      "sendBitsPerSecond": 80000,
+      "utilizationPercent": null,
+      "packetsReceivedPerSecond": 100,
+      "packetsSentPerSecond": 50,
+      "receiveErrors": 0,
+      "sendErrors": 0,
+      "receiveDiscards": 0,
+      "sendDiscards": null
+    }
+  ]
+}

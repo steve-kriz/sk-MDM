@@ -116,6 +116,24 @@ test('Scenario: Security headers are present - CSP contains default-src', async 
   assert.ok(csp.includes("default-src 'self'"), "CSP should contain default-src 'self'");
 });
 
+// ============================================================================
+// TASK-049 AC18: connect-src allows the presigned-S3 PUT, every other
+// directive stays byte-identical.
+// ============================================================================
+
+test('Scenario: Console may PUT to S3 -- the content-security-policy names Entra and S3, every other directive unchanged', async (t) => {
+  const response = await handler({
+    requestContext: { http: { method: 'GET', path: '/' } },
+    headers: {},
+  });
+
+  const csp = response.headers['content-security-policy'];
+  assert.strictEqual(
+    csp,
+    "default-src 'self'; connect-src 'self' https://login.microsoftonline.com https://*.amazonaws.com; img-src 'self' data:; base-uri 'self'; form-action 'self'; frame-ancestors 'none'",
+  );
+});
+
 test('Scenario: Security headers are present - x-content-type-options is nosniff', async (t) => {
   const event = {
     requestContext: {
@@ -229,7 +247,7 @@ test('Scenario: Landing page links to all four downloads and to the console', as
   assert.ok(body.includes('href="/downloads/windows-arm64"'), 'should contain windows-arm64 download link');
   assert.ok(body.includes('href="/downloads/macos-amd64"'), 'should contain macos-amd64 download link');
   assert.ok(body.includes('href="/downloads/macos-arm64"'), 'should contain macos-arm64 download link');
-  assert.ok(body.includes('href="/admin"'), 'should contain admin console link');
+  assert.ok(!body.includes('href="/admin"'), 'should not link to the admin console');
 });
 
 test('Scenario: Landing page never boots the console or contacts Entra', async (t) => {

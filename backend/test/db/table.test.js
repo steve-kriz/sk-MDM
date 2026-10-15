@@ -421,3 +421,48 @@ test('Unit: Consecutive puts record multiple sends', async () => {
   assert.strictEqual(sends[0].input.Item.pk, 'A');
   assert.strictEqual(sends[1].input.Item.pk, 'B');
 });
+
+test('Unit: createTableClient exposes scan', () => {
+  const fake = new FakeDocumentClient();
+  const client = createTableClient({ documentClient: fake, tableName: 'mdm' });
+  assert.ok(typeof client.scan === 'function');
+});
+
+test('Unit: scan sends a Scan command with TableName, fields passed through, and returns {items, cursor}', async () => {
+  const fake = new FakeDocumentClient();
+  const client = createTableClient({ documentClient: fake, tableName: 'mdm' });
+  const items = [{ pk: 'POLICY#p1', sk: 'PROFILE' }];
+  const lastKey = { pk: 'POLICY#p1', sk: 'PROFILE' };
+  fake.recordResponse({ Items: items, LastEvaluatedKey: lastKey });
+
+  const page = await client.scan({
+    FilterExpression: '#sk = :sk',
+    ExpressionAttributeNames: { '#sk': 'sk' },
+    ExpressionAttributeValues: { ':sk': 'PROFILE' },
+    limit: 10,
+  });
+
+  const sends = fake.getSends();
+  assert.strictEqual(sends.length, 1);
+  assert.strictEqual(sends[0].operation, 'Scan');
+  assert.strictEqual(sends[0].input.TableName, 'mdm');
+  assert.strictEqual(sends[0].input.Limit, 10);
+  assert.strictEqual(sends[0].input.FilterExpression, '#sk = :sk');
+  assert.strictEqual(sends[0].input.limit, undefined);
+  assert.deepStrictEqual(page.items, items);
+  assert.deepStrictEqual(decodeCursor(page.cursor), lastKey);
+});
+
+test('Unit: scan decodes a cursor into ExclusiveStartKey and returns a null cursor on the last page', async () => {
+  const fake = new FakeDocumentClient();
+  const client = createTableClient({ documentClient: fake, tableName: 'mdm' });
+  const startKey = { pk: 'POLICY#p1', sk: 'PROFILE' };
+  fake.recordResponse({ Items: [] });
+
+  const page = await client.scan({ cursor: encodeCursor(startKey) });
+
+  const sends = fake.getSends();
+  assert.deepStrictEqual(sends[0].input.ExclusiveStartKey, startKey);
+  assert.strictEqual(sends[0].input.cursor, undefined);
+  assert.deepStrictEqual(page, { items: [], cursor: null });
+});

@@ -2,22 +2,46 @@
 <!--
   The Windows installer for the SK-MDM agent.
 
-  The package takes the two values an unattended install needs as public,
-  secured properties, so a deployment tool can pass them on the command line:
+  Interactive installs show a branded wizard: Welcome, then the OfficeHQ MDM
+  settings page (collection URL, pre-filled with the value baked in at
+  packaging, and the device type), then Install. The exit page offers to sign
+  in: it runs `mdmagent open-signin` as the user, which opens the sign-in page
+  the agent has requested from the MDM site. The user signs in to Entra ID
+  there and the agent enrolls itself with that user's token.
+
+  Every value the wizard asks for is also a public, secured property, so a
+  deployment tool can install silently:
 
     msiexec /i OfficeHQ-MDM-1.2.3-x64.msi /qn ^
-      COLLECTIONURL=https://mdm.example.com ENROLLTOKEN=<token>
+      COLLECTIONURL=https://mdm.example.com OWNERSHIP=byoc
+
+  A silent install uses the baked collection URL and OWNERSHIP=officehq unless
+  told otherwise, and signs nobody in: someone uses the "Sign in to OfficeHQ
+  MDM" Start-menu shortcut later. ENROLLTOKEN is the legacy enrollment token,
+  still honoured by the agent and written to the config only when set.
 
   mdmagent.exe lands in [ProgramFiles64Folder]OfficeHQ\MDM\, the config file
   the agent reads (agent/internal/config) is written to
   C:\ProgramData\OfficeHQ\MDM\config.json after the files are laid down and
-  before the service is started, and the service, the config and the data
-  directory all go away again on uninstall.
+  before the service is started, and the service, the config, the data
+  directory and the shortcut all go away again on uninstall.
 
-  Built by installers/windows/build-plan.mjs, which supplies the Version and
-  AgentBinary preprocessor variables.
+  Built by installers/windows/build-plan.mjs, which supplies the Version,
+  AgentBinary, DefaultCollectionUrl, TenantId and ClientId preprocessor
+  variables and the WixToolset.UI extension (the wizard) and the
+  WixToolset.Util extension (the service recovery actions).
 -->
-<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+<?ifndef DefaultCollectionUrl ?>
+<?error DefaultCollectionUrl must be defined (pass -d DefaultCollectionUrl=https://...) ?>
+<?endif ?>
+<?ifndef TenantId ?>
+<?error TenantId must be defined (pass -d TenantId=...) ?>
+<?endif ?>
+<?ifndef ClientId ?>
+<?error ClientId must be defined (pass -d ClientId=...) ?>
+<?endif ?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package
     Name="OfficeHQ MDM Agent"
     Manufacturer="OfficeHQ"
@@ -38,15 +62,23 @@
     <MediaTemplate EmbedCab="yes" />
 
     <!-- Secure="yes" lets the values survive the switch to the elevated
-         server-side install, which is where the config file is written. -->
-    <Property Id="COLLECTIONURL" Secure="yes" />
+         server-side install, which is where the config file is written. The
+         defaults are the values baked in at packaging. -->
+    <Property Id="COLLECTIONURL" Value="$(var.DefaultCollectionUrl)" Secure="yes" />
+    <Property Id="OWNERSHIP" Value="officehq" Secure="yes" />
+    <Property Id="TENANTID" Value="$(var.TenantId)" Secure="yes" />
+    <Property Id="CLIENTID" Value="$(var.ClientId)" Secure="yes" />
     <Property Id="ENROLLTOKEN" Secure="yes" />
 
-    <!-- The agent cannot do anything without a collection URL, so an install
-         that omits it is refused before any file is copied. -->
+    <!-- The agent cannot do anything without a collection URL, and records
+         only the two device types, so anything else is refused before any
+         file is copied. -->
     <Launch
       Condition="COLLECTIONURL &lt;&gt; &quot;&quot;"
       Message="COLLECTIONURL is required" />
+    <Launch
+      Condition="OWNERSHIP = &quot;officehq&quot; OR OWNERSHIP = &quot;byoc&quot;"
+      Message="OWNERSHIP must be officehq or byoc" />
 
     <!-- [ProgramFiles64Folder]OfficeHQ\MDM\ -->
     <StandardDirectory Id="ProgramFiles64Folder">
@@ -61,6 +93,8 @@
         <Directory Id="DATAFOLDER" Name="MDM" />
       </Directory>
     </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder" />
 
     <ComponentGroup Id="AgentComponents">
       <Component Id="AgentExecutable" Directory="INSTALLFOLDER" Guid="3F1B6A47-9D52-4E0B-8C7F-2B5E6D1A4038">
@@ -78,7 +112,31 @@
           Account="LocalSystem"
           ErrorControl="normal"
           Arguments="run"
-          Vital="yes" />
+          Vital="yes">
+          <!-- Recovery actions: the agent never restarts itself. After a
+               self-update it exits with a service-specific error and the
+               service control manager restarts it onto the new binary; the
+               same actions cover a crash. The Util extension's ServiceConfig
+               is used because the core ServiceConfigFailureActions and
+               ServiceConfig elements are deprecated (WIX1149). Nested, it
+               takes the service from its parent and is applied whenever the
+               component is installed or reinstalled: restart after 5 seconds
+               on each of the first three failures, failure count reset after
+               1 day.
+
+               util:ServiceConfig cannot set the "enable actions for stops
+               with errors" flag. The agent sets it instead: at every managed
+               start the service calls service.EnsureRecovery, which runs
+               `sc.exe failure` and then `sc.exe failureflag OfficeHQMDMAgent 1`,
+               and ServiceControl below starts the service during install. Do
+               not put the core ServiceConfig back to set the flag. -->
+          <util:ServiceConfig
+            FirstFailureActionType="restart"
+            SecondFailureActionType="restart"
+            ThirdFailureActionType="restart"
+            RestartServiceDelayInSeconds="5"
+            ResetPeriodInDays="1" />
+        </ServiceInstall>
 
         <ServiceControl
           Id="AgentServiceControl"
@@ -105,69 +163,156 @@
         <RemoveFolder Id="RemoveAgentDataFolder" On="uninstall" />
         <RemoveFolder Id="RemoveAgentCompanyFolder" Directory="DataCompanyFolder" On="uninstall" />
       </Component>
+
+      <!-- "Sign in to OfficeHQ MDM": runs `mdmagent open-signin`, which
+           opens the sign-in page the agent is waiting on, for whoever skipped
+           or cancelled the sign-in at the end of the install. The component
+           owns it, so uninstall removes it. Windows Installer treats the
+           Start menu as a profile folder, so the key path is an HKCU value
+           (ICE38). -->
+      <Component Id="SignInShortcut" Directory="ProgramMenuFolder" Guid="5B0E3C71-2A9D-4F6E-B843-9C1D7E2A6F05">
+        <Shortcut
+          Id="SignInStartMenuShortcut"
+          Name="Sign in to OfficeHQ MDM"
+          Description="Sign in to OfficeHQ MDM to enroll this device"
+          Target="[INSTALLFOLDER]mdmagent.exe"
+          Arguments="open-signin"
+          WorkingDirectory="INSTALLFOLDER" />
+        <RegistryValue
+          Root="HKCU"
+          Key="SOFTWARE\OfficeHQ\MDM"
+          Name="SignInShortcut"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
     </ComponentGroup>
 
     <Feature Id="AgentFeature" Title="OfficeHQ MDM Agent" Level="1">
       <ComponentGroupRef Id="AgentComponents" />
     </Feature>
 
-    <!-- The config file carries the enrollment token, so it is written by a
-         deferred action running as the install server: the properties travel
-         across in CustomActionData. The shape written here is the one
-         installers/windows/config-writer.mjs renders and the one
-         agent/internal/config.Load reads. -->
+    <!-- The config file is written by a deferred action running as the
+         install server: the properties travel across in CustomActionData as
+         <dir>|<url>|<ownership>|<tenant>|<client>|<enrollToken>. The shape
+         written is the one installers/windows/config-writer.mjs renders and
+         the one agent/internal/config.Load reads. -->
     <CustomAction
       Id="SetWriteAgentConfigData"
       Property="WriteAgentConfig"
-      Value="[DATAFOLDER]|[COLLECTIONURL]|[ENROLLTOKEN]" />
+      Value="[DATAFOLDER]|[COLLECTIONURL]|[OWNERSHIP]|[TENANTID]|[CLIENTID]|[ENROLLTOKEN]" />
 
     <CustomAction
       Id="WriteAgentConfig"
       Script="jscript"
       Execute="deferred"
       Impersonate="no"
-      Return="check">
-      <![CDATA[
-      function jsonString(value) {
-        return '"' + value.replace(/\\/g, "\\\\").replace(/"/g, "\\\"") + '"';
-      }
-
-      var data = Session.Property("CustomActionData");
-      var firstSeparator = data.indexOf("|");
-      var directory = data.substring(0, firstSeparator);
-      var rest = data.substring(firstSeparator + 1);
-      var secondSeparator = rest.indexOf("|");
-      var collectionUrl = rest.substring(0, secondSeparator);
-      var enrollToken = rest.substring(secondSeparator + 1);
-
-      var fso = new ActiveXObject("Scripting.FileSystemObject");
-      if (!fso.FolderExists(directory)) {
-        var parent = fso.GetParentFolderName(directory);
-        if (parent.length > 0 && !fso.FolderExists(parent)) {
-          fso.CreateFolder(parent);
-        }
-        fso.CreateFolder(directory);
-      }
-
-      var lines = [
-        "{",
-        '  "collectionUrl": ' + jsonString(collectionUrl) + ",",
-        '  "enrollmentToken": ' + jsonString(enrollToken) + ",",
-        '  "checkInIntervalSeconds": 900,',
-        '  "logLevel": "info"',
-        "}",
-        ""
-      ];
-
-      var file = fso.CreateTextFile(fso.BuildPath(directory, "config.json"), true);
-      file.Write(lines.join("\r\n"));
-      file.Close();
-      ]]>
-    </CustomAction>
+      Return="check"
+      ScriptSourceFile="$(sys.SOURCEFILEDIR)write-config.js" />
 
     <InstallExecuteSequence>
       <Custom Action="SetWriteAgentConfigData" After="InstallFiles" Condition="NOT Installed" />
       <Custom Action="WriteAgentConfig" Before="StartServices" Condition="NOT Installed" />
     </InstallExecuteSequence>
+
+    <!-- Branding: the bitmaps installers/branding/render.mjs produces. -->
+    <WixVariable Id="WixUIBannerBmp" Value="$(sys.SOURCEFILEDIR)..\branding\banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="$(sys.SOURCEFILEDIR)..\branding\dialog.bmp" />
+
+    <!-- The exit dialog's "Sign in to OfficeHQ MDM now" runs
+         `mdmagent open-signin` impersonated, as the user, after the service
+         has started: it waits for the sign-in URL the service has requested
+         from the MDM site and opens it in the user's browser. The installer
+         does not wait for it. Silent installs never show the exit dialog, so
+         they never open a browser. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Sign in to OfficeHQ MDM now" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
+    <CustomAction
+      Id="OpenSignInPage"
+      FileRef="mdmagent.exe"
+      ExeCommand="open-signin"
+      Impersonate="yes"
+      Return="asyncNoWait" />
+
+    <UIRef Id="OfficeHQ_UI" />
   </Package>
+
+  <Fragment>
+    <!-- WixUI_Minimal-style: Welcome, the settings page, Install. Built from
+         the WixToolset.UI extension's stock dialogs plus OfficeHQSettingsDlg. -->
+    <UI Id="OfficeHQ_UI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Tahoma" Size="8" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Tahoma" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Tahoma" Size="9" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+      <DialogRef Id="WelcomeDlg" />
+
+      <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="OpenSignInPage" Order="1"
+               Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
+
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="OfficeHQSettingsDlg" Condition="NOT Installed" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Condition="Installed AND PATCH" />
+
+      <Publish Dialog="OfficeHQSettingsDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" />
+      <Publish Dialog="OfficeHQSettingsDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg"
+               Condition="COLLECTIONURL &lt;&lt; &quot;https://&quot;" />
+
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="OfficeHQSettingsDlg" Order="1" Condition="NOT Installed" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Order="2" Condition="Installed AND NOT PATCH" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2" Condition="Installed AND PATCH" />
+
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg" />
+
+      <Property Id="ARPNOMODIFY" Value="1" />
+
+      <!-- The collection URL and the device type. Next stays disabled while
+           the URL does not start with https://, the only scheme the agent
+           accepts. -->
+      <Dialog Id="OfficeHQSettingsDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="WixUI_Bmp_Banner" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="{\WixUI_Font_Title}OfficeHQ MDM settings" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes"
+                 Text="Check the collection URL and choose the device type." />
+
+        <Control Id="CollectionUrlLabel" Type="Text" X="20" Y="60" Width="320" Height="12" Text="&amp;Collection URL:" />
+        <Control Id="CollectionUrlEdit" Type="Edit" X="20" Y="74" Width="330" Height="18" Property="COLLECTIONURL" Text="{1024}" />
+        <Control Id="CollectionUrlHint" Type="Text" X="20" Y="96" Width="330" Height="12" NoPrefix="yes"
+                 Text="Must start with https://" />
+
+        <Control Id="OwnershipLabel" Type="Text" X="20" Y="120" Width="320" Height="12" Text="Device type:" />
+        <Control Id="OwnershipGroup" Type="RadioButtonGroup" X="20" Y="134" Width="330" Height="40" Property="OWNERSHIP">
+          <RadioButtonGroup Property="OWNERSHIP">
+            <RadioButton Value="officehq" X="0" Y="0" Width="320" Height="16" Text="OfficeHQ device" />
+            <RadioButton Value="byoc" X="0" Y="20" Width="320" Height="16" Text="BYOC (personal device)" />
+          </RadioButtonGroup>
+        </Control>
+
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)" />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)"
+                 EnableCondition="COLLECTIONURL &lt;&lt; &quot;https://&quot;"
+                 DisableCondition="NOT (COLLECTIONURL &lt;&lt; &quot;https://&quot;)" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+    </UI>
+
+    <UIRef Id="WixUI_Common" />
+  </Fragment>
 </Wix>

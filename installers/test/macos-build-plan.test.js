@@ -12,7 +12,8 @@ const VALID_ARGS = [
   '--version', '1.2.3',
   '--arch', 'arm64',
   '--collection-url', 'https://x.example/',
-  '--enroll-token', 't1',
+  '--tenant-id', 'tenant-1',
+  '--client-id', 'client-1',
   '--dry-run',
 ];
 
@@ -31,7 +32,8 @@ test('planPackage returns the staging and output paths', () => {
     version: '1.2.3',
     arch: 'arm64',
     collectionUrl: 'https://x.example/',
-    enrollToken: 't1',
+    tenantId: 'tenant-1',
+    clientId: 'client-1',
     signIdentity: 'ID-A',
   });
   strictEqual(plan.stagedBinaryPath, 'build/root/usr/local/bin/mdmagent');
@@ -45,7 +47,8 @@ test('planPackage plans an amd64 package', () => {
     version: '1.2.3',
     arch: 'amd64',
     collectionUrl: 'https://x.example/',
-    enrollToken: 't1',
+    tenantId: 'tenant-1',
+    clientId: 'client-1',
     signIdentity: 'ID-A',
   });
   strictEqual(plan.unsignedPath, 'build/OfficeHQ-MDM-1.2.3-amd64-unsigned.pkg');
@@ -57,7 +60,8 @@ test('planPackage pins the productsign command', () => {
     version: '1.2.3',
     arch: 'arm64',
     collectionUrl: 'https://x.example/',
-    enrollToken: 't1',
+    tenantId: 'tenant-1',
+    clientId: 'client-1',
     signIdentity: 'ID-A',
   });
   deepStrictEqual(plan.signCommand, [
@@ -74,7 +78,8 @@ test('planPackage returns no sign command without an identity', () => {
     version: '1.2.3',
     arch: 'arm64',
     collectionUrl: 'https://x.example/',
-    enrollToken: 't1',
+    tenantId: 'tenant-1',
+    clientId: 'client-1',
     signIdentity: '',
   });
   strictEqual(plan.signCommand, undefined);
@@ -83,7 +88,7 @@ test('planPackage returns no sign command without an identity', () => {
 test('planPackage refuses a collection URL the agent would not load', () => {
   for (const collectionUrl of [undefined, '', 'not a url', 'http://x.example/', 'ftp://x.example/']) {
     throws(
-      () => planPackage({ version: '1.2.3', arch: 'arm64', collectionUrl, enrollToken: 't1', signIdentity: 'ID-A' }),
+      () => planPackage({ version: '1.2.3', arch: 'arm64', collectionUrl, tenantId: 'tenant-1', clientId: 'client-1', signIdentity: 'ID-A' }),
       { message: 'collection url must be an https url' },
     );
   }
@@ -92,7 +97,7 @@ test('planPackage refuses a collection URL the agent would not load', () => {
 test('planPackage refuses an unsupported arch', () => {
   for (const arch of [undefined, '', 'ppc', '386']) {
     throws(
-      () => planPackage({ version: '1.2.3', arch, collectionUrl: 'https://x.example/', enrollToken: 't1', signIdentity: 'ID-A' }),
+      () => planPackage({ version: '1.2.3', arch, collectionUrl: 'https://x.example/', tenantId: 'tenant-1', clientId: 'client-1', signIdentity: 'ID-A' }),
       { message: 'unsupported arch' },
     );
   }
@@ -111,7 +116,7 @@ test('the dry run prints the four paths and exits 0', () => {
 });
 
 test('the CLI exits 2 without a collection URL', () => {
-  const args = ['--version', '1.2.3', '--arch', 'arm64', '--enroll-token', 't1', '--dry-run'];
+  const args = ['--version', '1.2.3', '--arch', 'arm64', '--tenant-id', 'tenant-1', '--client-id', 'client-1', '--dry-run'];
   const result = runPlanner(args, 'Developer ID Installer: OfficeHQ');
   strictEqual(result.status, 2);
   strictEqual(result.stdout, '');
@@ -148,4 +153,36 @@ test('the CLI exits 3 when the signing identity is empty', () => {
   strictEqual(result.status, 3);
   strictEqual(result.stdout, '');
   strictEqual(result.stderr.includes('signing identity not set'), true);
+});
+
+test('planPackage refuses an empty or malformed tenant or client id', () => {
+  const base = { version: '1.2.3', arch: 'arm64', collectionUrl: 'https://x.example/', signIdentity: 'ID-A' };
+  for (const tenantId of [undefined, '', 'a b', 'x|y']) {
+    throws(() => planPackage({ ...base, tenantId, clientId: 'client-1' }), (error) =>
+      error.message.startsWith('tenant id is required') && error.exitCode === 2);
+  }
+  for (const clientId of [undefined, '', "a'b"]) {
+    throws(() => planPackage({ ...base, tenantId: 'tenant-1', clientId }), (error) =>
+      error.message.startsWith('client id is required') && error.exitCode === 2);
+  }
+});
+
+for (const [flag, message] of [
+  ['--tenant-id', 'tenant id is required'],
+  ['--client-id', 'client id is required'],
+]) {
+  test(`the CLI exits 2 without ${flag}`, () => {
+    const args = [...VALID_ARGS];
+    args.splice(args.indexOf(flag), 2);
+    const result = runPlanner(args, 'Developer ID Installer: OfficeHQ');
+    strictEqual(result.status, 2);
+    strictEqual(result.stdout, '');
+    strictEqual(result.stderr.includes(message), true);
+  });
+}
+
+test('the CLI no longer accepts --enroll-token', () => {
+  const result = runPlanner([...VALID_ARGS, '--enroll-token', 't1'], 'Developer ID Installer: OfficeHQ');
+  strictEqual(result.status, 2);
+  strictEqual(result.stderr.includes('unknown argument: --enroll-token'), true);
 });

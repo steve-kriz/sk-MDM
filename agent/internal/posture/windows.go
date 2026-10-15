@@ -24,7 +24,7 @@ const (
 	// missing values into False and 0) and a host without Security Center
 	// (Windows Server), which simply prints no product lines.
 	windowsAntivirusScript = `$s = Get-MpComputerStatus -ErrorAction SilentlyContinue; "name=Microsoft Defender"; ` +
-		`"enabled=$([bool]$s.AntivirusEnabled)"; "definitionsAgeDays=$([int]$s.AntivirusSignatureAge)"; ` +
+		`"enabled=$([bool]$s.AntivirusEnabled -and [bool]$s.RealTimeProtectionEnabled)"; "definitionsAgeDays=$([int]$s.AntivirusSignatureAge)"; ` +
 		`Get-CimInstance -Namespace root/SecurityCenter2 -ClassName AntiVirusProduct -ErrorAction SilentlyContinue | ` +
 		`ForEach-Object { "product=$($_.productState)|$($_.displayName)" }`
 

@@ -13,6 +13,15 @@
  * The route is public: it reads no authorization or device signature header.
  * Its store is injected and no AWS client is constructed here; start-up calls
  * `configureDownloadRoute({ bucket, installers })` before the first request.
+ *
+ *   GET /api/v1/downloads
+ *   -> {"versions":{"windows-x64":"1.2.3","windows-arm64":null,...}}
+ *
+ * is its public companion: the version each platform's installer was published
+ * as, which the landing page shows next to the link. The version is read from
+ * the `OfficeHQ-MDM-<version>-<arch>` file name scripts/publish-installers.mjs
+ * puts in the object's `Content-Disposition`; `null` means nothing (readable)
+ * is published for that platform.
  */
 import type { RouteHandler, RouteResult, Router } from '../http/router.js';
 
@@ -44,10 +53,55 @@ export function installerKey(slug: DownloadPlatform): string {
   return INSTALLER_KEYS[slug];
 }
 
+/**
+ * The fixed object key each agent release platform's raw binary is published
+ * to by scripts/publish-installers.mjs; check-in presigns it for self-update.
+ */
+const AGENT_BUILD_KEYS: Record<string, string> = {
+  'windows-amd64': 'agent/windows-amd64/mdmagent.exe',
+  'windows-arm64': 'agent/windows-arm64/mdmagent.exe',
+  'darwin-amd64': 'agent/darwin-amd64/mdmagent',
+  'darwin-arm64': 'agent/darwin-arm64/mdmagent',
+};
+
+/** The object key of a platform's published agent binary; throws on an unknown platform. */
+export function agentBuildKey(platform: string): string {
+  if (typeof platform !== 'string' || !Object.prototype.hasOwnProperty.call(AGENT_BUILD_KEYS, platform)) {
+    throw new Error(`invalid id: ${platform}`);
+  }
+  return AGENT_BUILD_KEYS[platform] as string;
+}
+
+/** Path the published installer versions are answered on. */
+export const DOWNLOAD_VERSIONS_PATH = '/api/v1/downloads';
+
+/** `OfficeHQ-MDM-1.2.3-x64.msi` -> `1.2.3`. */
+const PUBLISHED_FILE_VERSION = /OfficeHQ-MDM-([0-9]+\.[0-9]+\.[0-9]+)-/;
+
+/**
+ * The version in a published installer's `Content-Disposition` file name, or
+ * `null` when the header is absent or names no version.
+ */
+export function versionFromContentDisposition(value: string | undefined): string | null {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const match = PUBLISHED_FILE_VERSION.exec(value);
+  return match === null ? null : (match[1] ?? null);
+}
+
 /** The installer storage operations this route needs: the subset a fake must implement. */
 export interface InstallerStore {
   exists(key: string): Promise<boolean>;
   presignGet(key: string, ttlSeconds: number): Promise<string>;
+  /** The published version of the object at `key`, or `null`; a store without it answers `null` everywhere. */
+  version?(key: string): Promise<string | null>;
+  /** The published agent build at `key` from its object metadata, or `null` when absent or malformed. */
+  agentBuild?(key: string): Promise<{ version: string; sha256: string } | null>;
+  /** A presigned PutObject URL for `key`, valid for `ttlSeconds` (application uploads). */
+  presignPut?(key: string, ttlSeconds: number): Promise<string>;
+  /** The size in bytes of the object at `key`, or `null` when it does not exist. */
+  objectSize?(key: string): Promise<number | null>;
 }
 
 export interface DownloadDependencies {
@@ -102,9 +156,33 @@ export function createDownloadHandler(source: DownloadDependencySource): RouteHa
   };
 }
 
-/** Register the route on a router. Returns the router, so calls chain. */
+/**
+ * Build the `GET /api/v1/downloads` handler: every platform's published
+ * version, read in parallel, `null` where none is published.
+ */
+export function createDownloadVersionsHandler(source: DownloadDependencySource): RouteHandler {
+  return async function handleDownloadVersions(): Promise<RouteResult> {
+    const deps = typeof source === 'function' ? await source() : source;
+    const installers = deps?.installers;
+    if (typeof deps?.bucket !== 'string' || deps.bucket === '' || !installers) {
+      return failure(500, 'not_configured');
+    }
+
+    const read = await Promise.all(
+      DOWNLOAD_PLATFORMS.map(async (slug) =>
+        installers.version === undefined ? null : await installers.version(installerKey(slug)),
+      ),
+    );
+    const versions = Object.fromEntries(DOWNLOAD_PLATFORMS.map((slug, i) => [slug, read[i] ?? null]));
+    return { statusCode: 200, headers: { 'cache-control': 'no-store' }, body: { versions } };
+  };
+}
+
+/** Register the download route and its versions route on a router. Returns the router, so calls chain. */
 export function registerDownloadRoute(router: Router, source: DownloadDependencySource): Router {
-  return router.add('GET', DOWNLOAD_PATH, createDownloadHandler(source));
+  return router
+    .add('GET', DOWNLOAD_PATH, createDownloadHandler(source))
+    .add('GET', DOWNLOAD_VERSIONS_PATH, createDownloadVersionsHandler(source));
 }
 
 /** Dependencies supplied at start-up by `configureDownloadRoute`. */

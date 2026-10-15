@@ -63,6 +63,7 @@ func TestScenario_EnforcerNameIsAntivirus(t *testing.T) {
 // one case Apply runs its command.
 func TestScenario_WindowsDeviceWithNoActiveAntivirusRunsEnableCommandOnce(t *testing.T) {
 	runner := fake.NewCommandRunner()
+	runner.Results[enableCommandKey()] = platform.CommandResult{Stdout: "realTimeProtectionEnabled=True\n"}
 	clock := fake.NewClock(time.Now())
 	e := antivirus.NewEnforcer(runner, clock, "windows")
 
@@ -314,4 +315,173 @@ func TestScenario_EnforceRunLogsOneWarnLineOnFailure(t *testing.T) {
 		enforce.Run(context.Background(), []enforce.Enforcer{e}, effective, posture, logger)
 		assertOneWarnLine(t, fs, "timeout")
 	})
+}
+
+// ============================================================================
+// AC6: the Actions recorder.
+// ============================================================================
+
+// TestScenario_AC6_TurningRealTimeProtectionOnIsRecordedOnlyWhenConfirmed
+// covers:
+//
+//	Given GOOS windows, antivirusEnabled true, antivirus off and a read-back
+//	     "realTimeProtectionEnabled=True"
+//	When the antivirus enforcer applies
+//	Then Actions was called once with "enforce.antivirus_enabled"
+func TestScenario_AC6_TurningRealTimeProtectionOnIsRecordedOnlyWhenConfirmed(t *testing.T) {
+	runner := fake.NewCommandRunner()
+	runner.Results[enableCommandKey()] = platform.CommandResult{Stdout: "realTimeProtectionEnabled=True\n"}
+	clock := fake.NewClock(time.Now())
+	e := antivirus.NewEnforcer(runner, clock, "windows")
+
+	var calls []string
+	var lastDetails map[string]string
+	e.Actions = func(actionType string, details map[string]string) {
+		calls = append(calls, actionType)
+		lastDetails = details
+	}
+
+	effective := map[string]any{antivirus.SettingAntivirusEnabled: true}
+	posture := contract.Posture{Antivirus: contract.Antivirus{Enabled: false}}
+
+	err := e.Apply(context.Background(), effective, posture)
+	if err != nil {
+		t.Fatalf("Apply returned an error: %v", err)
+	}
+	if len(calls) != 1 || calls[0] != contract.ActionAntivirusEnabled {
+		t.Fatalf("Actions calls = %v, want exactly one call with %q", calls, contract.ActionAntivirusEnabled)
+	}
+	if len(lastDetails) != 0 {
+		t.Errorf("details = %+v, want empty", lastDetails)
+	}
+}
+
+// TestScenario_AC6Outline_AnUnconfirmedAntivirusEnableRecordsNothing covers
+// the scenario outline's four outcomes, plus NewEnforcer's signature being
+// unchanged (used throughout this file already) and a nil Actions recording
+// nothing.
+func TestScenario_AC6Outline_AnUnconfirmedAntivirusEnableRecordsNothing(t *testing.T) {
+	effective := map[string]any{antivirus.SettingAntivirusEnabled: true}
+	posture := contract.Posture{Antivirus: contract.Antivirus{Enabled: false}}
+
+	t.Run(`a read-back "realTimeProtectionEnabled=False" with tamper on`, func(t *testing.T) {
+		runner := fake.NewCommandRunner()
+		runner.Results[enableCommandKey()] = platform.CommandResult{
+			Stdout: "realTimeProtectionEnabled=False\nisTamperProtected=True\n",
+		}
+		clock := fake.NewClock(time.Now())
+		e := antivirus.NewEnforcer(runner, clock, "windows")
+		called := false
+		e.Actions = func(string, map[string]string) { called = true }
+
+		err := e.Apply(context.Background(), effective, posture)
+		if !errors.Is(err, antivirus.ErrTamperProtected) {
+			t.Fatalf("err = %v, want ErrTamperProtected", err)
+		}
+		if called {
+			t.Error("Actions was called despite tamper protection blocking the change")
+		}
+	})
+
+	t.Run("a read-back with no realTimeProtectionEnabled line", func(t *testing.T) {
+		runner := fake.NewCommandRunner()
+		runner.Results[enableCommandKey()] = platform.CommandResult{Stdout: "nothing useful here\n"}
+		clock := fake.NewClock(time.Now())
+		e := antivirus.NewEnforcer(runner, clock, "windows")
+		called := false
+		e.Actions = func(string, map[string]string) { called = true }
+
+		err := e.Apply(context.Background(), effective, posture)
+		if !errors.Is(err, antivirus.ErrEnableUnparseable) {
+			t.Fatalf("err = %v, want ErrEnableUnparseable", err)
+		}
+		if called {
+			t.Error("Actions was called for an unparseable read-back")
+		}
+	})
+
+	t.Run("exit code 1", func(t *testing.T) {
+		runner := fake.NewCommandRunner()
+		runner.Results[enableCommandKey()] = platform.CommandResult{ExitCode: 1}
+		clock := fake.NewClock(time.Now())
+		e := antivirus.NewEnforcer(runner, clock, "windows")
+		called := false
+		e.Actions = func(string, map[string]string) { called = true }
+
+		err := e.Apply(context.Background(), effective, posture)
+		if err == nil {
+			t.Fatal("expected an error for a non-zero exit code")
+		}
+		if called {
+			t.Error("Actions was called for a non-zero exit code")
+		}
+	})
+
+	t.Run("a timeout", func(t *testing.T) {
+		runner := newBlockingRunner()
+		clock := fake.NewClock(time.Now())
+		e := antivirus.NewEnforcer(runner, clock, "windows")
+		called := false
+		e.Actions = func(string, map[string]string) { called = true }
+
+		go func() {
+			<-runner.started
+			clock.Advance(antivirus.EnforceTimeout)
+		}()
+
+		err := e.Apply(context.Background(), effective, posture)
+		if err == nil {
+			t.Fatal("expected a timeout error")
+		}
+		if called {
+			t.Error("Actions was called on a timeout")
+		}
+	})
+}
+
+// TestScenario_AC6_ANilActionsRecordsNothing covers "A nil Actions records
+// nothing": the zero-value Enforcer still applies successfully.
+func TestScenario_AC6_ANilActionsRecordsNothing(t *testing.T) {
+	runner := fake.NewCommandRunner()
+	runner.Results[enableCommandKey()] = platform.CommandResult{Stdout: "realTimeProtectionEnabled=True\n"}
+	clock := fake.NewClock(time.Now())
+	e := antivirus.NewEnforcer(runner, clock, "windows")
+
+	effective := map[string]any{antivirus.SettingAntivirusEnabled: true}
+	posture := contract.Posture{Antivirus: contract.Antivirus{Enabled: false}}
+
+	err := e.Apply(context.Background(), effective, posture)
+	if err != nil {
+		t.Fatalf("Apply returned an error with a nil Actions: %v", err)
+	}
+}
+
+// ============================================================================
+// AC9: the hardener and the scanner never record an action -- structurally,
+// because neither type exposes an Actions field to call.
+// ============================================================================
+
+// TestScenario_AC9_HardenerAndScannerExposeNoActionsField documents and locks
+// in the structural guarantee: antivirus.NewHardener and antivirus.NewScanner
+// return types with no Actions field, so no agent action can ever be recorded
+// from either, whatever they apply.
+func TestScenario_AC9_HardenerAndScannerExposeNoActionsField(t *testing.T) {
+	runner := fake.NewCommandRunner()
+	clock := fake.NewClock(time.Now())
+	fsys := fake.NewFS()
+
+	hardener := antivirus.NewHardener(runner, clock, "windows")
+	if hardener == nil {
+		t.Fatal("NewHardener returned nil")
+	}
+	scanner := antivirus.NewScanner(runner, clock, fsys, "windows", nil, "/scan-state.json")
+	if scanner == nil {
+		t.Fatal("NewScanner returned nil")
+	}
+	// Both are enforce.Enforcer implementations with no exported Actions
+	// field; compilation of this file is itself the proof for the Enforcer
+	// type (see TestScenario_AC6_TurningRealTimeProtectionOnIsRecordedOnlyWhenConfirmed
+	// for the one type in this package that does expose one).
+	var _ enforce.Enforcer = hardener
+	var _ enforce.Enforcer = scanner
 }

@@ -251,8 +251,8 @@ func TestScenario_EmptyAndOversizedOutputDoNotPanic(t *testing.T) {
 func TestScenario_HangingProbeTimesOut(t *testing.T) {
 	// Given a probe that never returns and a fake clock
 	runner := &hangingCommandRunner{
-		inner: fake.NewCommandRunner(),
-		hangOn: inventory.ProbeOS,
+		inner:   fake.NewCommandRunner(),
+		hangOn:  inventory.ProbeOS,
 		started: make(chan struct{}),
 	}
 
@@ -299,8 +299,8 @@ func TestScenario_HangingProbeTimesOut(t *testing.T) {
 
 // hangingCommandRunner wraps a fake runner but makes one probe hang forever.
 type hangingCommandRunner struct {
-	inner  *fake.CommandRunner
-	hangOn string
+	inner   *fake.CommandRunner
+	hangOn  string
 	started chan struct{}
 }
 
@@ -542,7 +542,7 @@ func TestUnit_NormalizeArch(t *testing.T) {
 			for _, p := range probes {
 				if p.Name == inventory.ProbeOS {
 					runner.Results[p.String()] = platform.CommandResult{
-						Stdout: "name=Windows\nversion=10.0\nbuild=22631\narchitecture=" + tt.input,
+						Stdout:   "name=Windows\nversion=10.0\nbuild=22631\narchitecture=" + tt.input,
 						ExitCode: 0,
 					}
 				} else {
@@ -586,7 +586,7 @@ func TestUnit_ParseBytes(t *testing.T) {
 			for _, p := range probes {
 				if p.Name == inventory.ProbeHardware {
 					runner.Results[p.String()] = platform.CommandResult{
-						Stdout: "ramBytes=" + tt.input,
+						Stdout:   "ramBytes=" + tt.input,
 						ExitCode: 0,
 					}
 				} else {

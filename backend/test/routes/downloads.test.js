@@ -23,6 +23,7 @@ const {
   DOWNLOAD_PLATFORMS,
   DOWNLOAD_URL_TTL_SECONDS,
   installerKey,
+  agentBuildKey,
   isDownloadPlatform,
   createDownloadHandler,
   registerDownloadRoute,
@@ -292,4 +293,28 @@ test('Unit: presignGet rejection answers 500 internal_error', async () => {
   assert.strictEqual(response.statusCode, 500);
   assert.deepStrictEqual(JSON.parse(response.body), { error: 'internal_error' });
   assert.strictEqual(errorLines.length, 1);
+});
+
+// ============================================================================
+// TASK-048 (AC7): agentBuildKey maps platform ids to the published agent
+// binary's fixed object key, or throws for an unknown one.
+// ============================================================================
+
+test('Scenario: Agent build keys per platform', () => {
+  // When I call agentBuildKey("windows-arm64")
+  // Then the result is "agent/windows-arm64/mdmagent.exe"
+  assert.strictEqual(agentBuildKey('windows-arm64'), 'agent/windows-arm64/mdmagent.exe');
+  assert.strictEqual(agentBuildKey('windows-amd64'), 'agent/windows-amd64/mdmagent.exe');
+  assert.strictEqual(agentBuildKey('darwin-amd64'), 'agent/darwin-amd64/mdmagent');
+  assert.strictEqual(agentBuildKey('darwin-arm64'), 'agent/darwin-arm64/mdmagent');
+});
+
+test('Scenario: Unknown platform has no agent build key', () => {
+  // When I call agentBuildKey("linux-amd64")
+  // Then an Error with message "invalid id: linux-amd64" is thrown
+  assert.throws(() => agentBuildKey('linux-amd64'), (err) => err instanceof Error && err.message === 'invalid id: linux-amd64');
+});
+
+test('Unit: agentBuildKey rejects a non-string value with its string form in the message', () => {
+  assert.throws(() => agentBuildKey(undefined), (err) => err instanceof Error && err.message === 'invalid id: undefined');
 });

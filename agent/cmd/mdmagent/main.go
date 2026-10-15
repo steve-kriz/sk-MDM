@@ -9,7 +9,15 @@
 //	mdmagent config set-url [-config <path>] <https url>
 //	mdmagent config show [-config <path>] [-state <path>]
 //	mdmagent login [-config <path>]
-//	mdmagent logout
+//	mdmagent open-signin [-config <path>]
+//
+// `open-signin` runs as the desktop user: it opens, in the default browser, the
+// MDM site's sign-in address the running service has published (waiting up to
+// 30 seconds for it). Signing in there lets an agent with no enrollment token
+// enroll. With nothing published it prints "no sign-in is pending" and exits 1.
+//
+// `login` is the same sign-in from an elevated console, by device code: it
+// mints a single-use enrollment token and writes it to the config.
 //
 // `run` is the agent itself, and is the verb both service managers are pointed
 // at: the Windows service and the macOS LaunchDaemon start this binary with it.
@@ -38,6 +46,10 @@ const (
 	exitOK         = 0
 	exitError      = 1
 	exitInvalidURL = 2
+	// exitRestart asks the service manager to start the agent again: an
+	// update or a rollback has put a different binary in place.
+	// It is service.ExitRestart.
+	exitRestart = 3
 )
 
 // redactedToken is printed in place of the enrollment token. The device secret
@@ -61,8 +73,8 @@ func run(fsys platform.FileSystem, goos string, args []string, stdout, stderr io
 			return runInstallService(fsys, goos, args[1:], stdout, stderr)
 		case "login":
 			return runLogin(fsys, goos, args[1:], stdout, stderr)
-		case "logout":
-			return runLogout(fsys, goos, args[1:], stdout, stderr)
+		case "open-signin":
+			return runOpenSignIn(fsys, goos, args[1:], stdout, stderr)
 		case "uninstall-service":
 			return runUninstallService(fsys, goos, args[1:], stdout, stderr)
 		}

@@ -259,3 +259,77 @@ func (m *mockEnforcer) Apply(ctx context.Context, effective map[string]any, post
 	return m.err
 }
 
+
+// ============================================================================
+// AC8: Defaults and DefaultsWithActions build the same list.
+// ============================================================================
+
+// TestScenario_AC8_DefaultsAndDefaultsWithActionsBuildTheSameList covers:
+//
+//	When enforce.DefaultsWithActions is called with a recorder
+//	Then it returns [firewall, domains], both with Actions set
+//	And enforce.Defaults returns [firewall, domains] with nil Actions
+func TestScenario_AC8_DefaultsAndDefaultsWithActionsBuildTheSameList(t *testing.T) {
+	runner := fake.NewCommandRunner()
+	fsys := fake.NewFS()
+	var recorded []string
+	recorder := func(actionType string, details map[string]string) { recorded = append(recorded, actionType) }
+
+	withActions := DefaultsWithActions(runner, fsys, "windows", nil, recorder)
+	if len(withActions) != 2 {
+		t.Fatalf("DefaultsWithActions returned %d enforcers, want 2", len(withActions))
+	}
+	fw, ok := withActions[0].(*Firewall)
+	if !ok || fw.Name() != "firewall" {
+		t.Fatalf("first enforcer = %+v, want *Firewall", withActions[0])
+	}
+	if fw.Actions == nil {
+		t.Error("firewall enforcer's Actions should be set")
+	}
+	dom, ok := withActions[1].(*Domains)
+	if !ok || dom.Name() != "domains" {
+		t.Fatalf("second enforcer = %+v, want *Domains", withActions[1])
+	}
+	if dom.Actions == nil {
+		t.Error("domains enforcer's Actions should be set")
+	}
+
+	plain := Defaults(runner, fsys, "windows", nil)
+	if len(plain) != 2 || plain[0].Name() != "firewall" || plain[1].Name() != "domains" {
+		t.Fatalf("Defaults = %+v, want [firewall, domains]", plain)
+	}
+	plainFw, ok := plain[0].(*Firewall)
+	if !ok || plainFw.Actions != nil {
+		t.Error("Defaults' firewall enforcer should have nil Actions")
+	}
+	plainDom, ok := plain[1].(*Domains)
+	if !ok || plainDom.Actions != nil {
+		t.Error("Defaults' domains enforcer should have nil Actions")
+	}
+}
+
+// TestScenario_AC8_ExistingDefaultsCallersStillPass is a regression guard: the
+// production callers of Defaults (run_test.go, this package's own tests)
+// still see the unchanged two-enforcer, nil-Actions list.
+func TestScenario_AC8_ExistingDefaultsCallersStillPass(t *testing.T) {
+	runner := fake.NewCommandRunner()
+	fsys := fake.NewFS()
+	enforcers := Defaults(runner, fsys, "darwin", nil)
+	if len(enforcers) != 2 {
+		t.Fatalf("Defaults returned %d enforcers, want 2", len(enforcers))
+	}
+	for _, e := range enforcers {
+		switch v := e.(type) {
+		case *Firewall:
+			if v.Actions != nil {
+				t.Error("Firewall.Actions should be nil from Defaults")
+			}
+		case *Domains:
+			if v.Actions != nil {
+				t.Error("Domains.Actions should be nil from Defaults")
+			}
+		default:
+			t.Errorf("unexpected enforcer type %T", e)
+		}
+	}
+}

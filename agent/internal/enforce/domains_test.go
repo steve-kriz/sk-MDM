@@ -720,3 +720,173 @@ func TestUnit_ManagedBlockIgnoresTrailingCR(t *testing.T) {
 		t.Errorf("Expected found=true with Windows line endings")
 	}
 }
+
+// ============================================================================
+// AC7: the Actions recorder.
+// ============================================================================
+
+// TestScenario_AC7_RewritingTheHostsBlockIsRecordedEvenWhenTheFlushFails
+// covers:
+//
+//	Given firewallBlockedDomains ["example.com"] and a hosts file with no
+//	     managed block
+//	And the DNS flush command exits 1
+//	When the domains enforcer applies
+//	Then Actions was called once with "enforce.domains_updated" and
+//	     blockedCount "2"
+func TestScenario_AC7_RewritingTheHostsBlockIsRecordedEvenWhenTheFlushFails(t *testing.T) {
+	runner := fake.NewCommandRunner()
+	runner.Results["ipconfig.exe /flushdns"] = platform.CommandResult{ExitCode: 1, Stderr: "boom"}
+	fsys := fake.NewFS()
+
+	var calls []string
+	var lastDetails map[string]string
+	d := &Domains{Runner: runner, FS: fsys, GOOS: "windows", Actions: func(actionType string, details map[string]string) {
+		calls = append(calls, actionType)
+		lastDetails = details
+	}}
+	effective := map[string]any{SettingFirewallBlockedDomains: []any{"example.com"}}
+
+	err := d.Apply(context.Background(), effective, contract.Posture{})
+
+	// The flush failure surfaces as an error from Apply, but the action was
+	// still recorded because the write happened before the flush ran.
+	if err == nil {
+		t.Fatal("expected the flush failure to surface as an error")
+	}
+	if len(calls) != 1 || calls[0] != contract.ActionDomainsUpdated {
+		t.Fatalf("Actions calls = %v, want exactly one call with %q", calls, contract.ActionDomainsUpdated)
+	}
+	// "example.com" and its "www." form: blockedCount "2".
+	if lastDetails["blockedCount"] != "2" {
+		t.Errorf("blockedCount = %q, want %q", lastDetails["blockedCount"], "2")
+	}
+}
+
+// TestScenario_AC7_AnUnchangedOrFailedHostsWriteRecordsNothing covers:
+//
+//	Given a hosts file whose managed block already lists the blocked names
+//	When the domains enforcer applies
+//	Then Actions was not called
+//	And with a hosts file holding two BEGIN markers Actions is not called either
+func TestScenario_AC7_AnUnchangedOrFailedHostsWriteRecordsNothing(t *testing.T) {
+	t.Run("content unchanged", func(t *testing.T) {
+		runner := fake.NewCommandRunner()
+		fsys := fake.NewFS()
+		hostsContent := "# BEGIN sk-mdm managed block - do not edit\r\n0.0.0.0 a.com\r\n:: a.com\r\n0.0.0.0 www.a.com\r\n:: www.a.com\r\n# END sk-mdm managed block\r\n"
+		fsys.Seed(WindowsHostsPath, []byte(hostsContent))
+
+		called := false
+		d := &Domains{Runner: runner, FS: fsys, GOOS: "windows", Actions: func(string, map[string]string) { called = true }}
+		effective := map[string]any{SettingFirewallBlockedDomains: []any{"a.com"}}
+
+		err := d.Apply(context.Background(), effective, contract.Posture{})
+		if err != nil {
+			t.Fatalf("Apply returned an error: %v", err)
+		}
+		if called {
+			t.Error("Actions was called for an unchanged hosts file")
+		}
+	})
+
+	t.Run("malformed block (two BEGIN markers)", func(t *testing.T) {
+		runner := fake.NewCommandRunner()
+		fsys := fake.NewFS()
+		hostsContent := "# BEGIN sk-mdm managed block - do not edit\r\n0.0.0.0 a.com\r\n# BEGIN sk-mdm managed block - do not edit\r\n# END sk-mdm managed block\r\n"
+		fsys.Seed(WindowsHostsPath, []byte(hostsContent))
+
+		called := false
+		d := &Domains{Runner: runner, FS: fsys, GOOS: "windows", Actions: func(string, map[string]string) { called = true }}
+		effective := map[string]any{SettingFirewallBlockedDomains: []any{"a.com"}}
+
+		err := d.Apply(context.Background(), effective, contract.Posture{})
+		if err == nil {
+			t.Fatal("expected a malformed-block error")
+		}
+		if called {
+			t.Error("Actions was called for a malformed managed block")
+		}
+	})
+
+	t.Run("write fails", func(t *testing.T) {
+		runner := fake.NewCommandRunner()
+		fsys := fake.NewFS()
+		fsys.FailWrite(WindowsHostsPath+".tmp", errors.New("disk full"))
+
+		called := false
+		d := &Domains{Runner: runner, FS: fsys, GOOS: "windows", Actions: func(string, map[string]string) { called = true }}
+		effective := map[string]any{SettingFirewallBlockedDomains: []any{"a.com"}}
+
+		err := d.Apply(context.Background(), effective, contract.Posture{})
+		if err == nil {
+			t.Fatal("expected a write error")
+		}
+		if called {
+			t.Error("Actions was called when the write failed")
+		}
+	})
+
+	t.Run("GOOS with no hosts file", func(t *testing.T) {
+		runner := fake.NewCommandRunner()
+		fsys := fake.NewFS()
+		called := false
+		d := &Domains{Runner: runner, FS: fsys, GOOS: "linux", Actions: func(string, map[string]string) { called = true }}
+		effective := map[string]any{SettingFirewallBlockedDomains: []any{"a.com"}}
+
+		err := d.Apply(context.Background(), effective, contract.Posture{})
+		if err != nil {
+			t.Fatalf("Apply returned an error: %v", err)
+		}
+		if called {
+			t.Error("Actions was called on a GOOS with no hosts file")
+		}
+	})
+}
+
+// TestScenario_AC7_ClearingTheBlockRecordsBlockedCountZero covers:
+//
+//	Given an empty firewallBlockedDomains and a hosts file with a managed block
+//	When the domains enforcer applies
+//	Then Actions was called with blockedCount "0"
+func TestScenario_AC7_ClearingTheBlockRecordsBlockedCountZero(t *testing.T) {
+	runner := fake.NewCommandRunner()
+	fsys := fake.NewFS()
+	hostsContent := "# BEGIN sk-mdm managed block - do not edit\r\n0.0.0.0 a.com\r\n:: a.com\r\n# END sk-mdm managed block\r\n"
+	fsys.Seed(WindowsHostsPath, []byte(hostsContent))
+
+	var lastDetails map[string]string
+	called := 0
+	d := &Domains{Runner: runner, FS: fsys, GOOS: "windows", Actions: func(actionType string, details map[string]string) {
+		called++
+		lastDetails = details
+	}}
+	effective := map[string]any{SettingFirewallBlockedDomains: []any{}}
+
+	err := d.Apply(context.Background(), effective, contract.Posture{})
+	if err != nil {
+		t.Fatalf("Apply returned an error: %v", err)
+	}
+	if called != 1 {
+		t.Fatalf("Actions called %d times, want 1", called)
+	}
+	if lastDetails["blockedCount"] != "0" {
+		t.Errorf("blockedCount = %q, want %q", lastDetails["blockedCount"], "0")
+	}
+}
+
+// TestScenario_AC7_ANilActionsRecordsNothing covers a nil Actions behaving
+// exactly as before: no panic, the hosts file still gets written.
+func TestScenario_AC7_ANilActionsRecordsNothing(t *testing.T) {
+	runner := fake.NewCommandRunner()
+	fsys := fake.NewFS()
+	d := &Domains{Runner: runner, FS: fsys, GOOS: "windows"}
+	effective := map[string]any{SettingFirewallBlockedDomains: []any{"a.com"}}
+
+	err := d.Apply(context.Background(), effective, contract.Posture{})
+	if err != nil {
+		t.Fatalf("Apply returned an error: %v", err)
+	}
+	if !fsys.Exists(WindowsHostsPath) {
+		t.Error("expected the hosts file to have been written")
+	}
+}

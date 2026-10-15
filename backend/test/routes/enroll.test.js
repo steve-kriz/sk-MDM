@@ -81,9 +81,21 @@ class FakeTable {
     // Simulate the update
     const existing = this.items.get(keyStr) || {};
     const updated = { ...existing, ...key };
+
+    // Handle useCount increment (claim update with ':zero' marker)
     if (fields?.ExpressionAttributeValues?.[':zero'] !== undefined) {
       updated.useCount = (existing.useCount ?? 0) + 1;
     }
+
+    // Handle list_append for deviceIds
+    if (fields?.UpdateExpression?.includes('list_append')) {
+      const deviceIdList = fields?.ExpressionAttributeValues?.[':deviceIdList'];
+      if (deviceIdList && Array.isArray(deviceIdList)) {
+        const existing_deviceIds = existing.deviceIds || [];
+        updated.deviceIds = [...existing_deviceIds, ...deviceIdList];
+      }
+    }
+
     this.items.set(keyStr, updated);
     return updated;
   }
@@ -680,7 +692,8 @@ test('Scenario: Losing the pointer race reuses the winner\'s device', async (t) 
   assert.strictEqual(result.body.deviceId, deviceId);
 
   const deviceProfiles = Array.from(table.items.values()).filter(
-    (item) => item.pk === `DEVICE#${deviceId}`
+    // TASK-067: the enrollment's History event (EVENT#) is not a profile item.
+    (item) => item.pk === `DEVICE#${deviceId}` && !String(item.sk).startsWith('EVENT#')
   );
   assert.strictEqual(deviceProfiles.length, 1, 'exactly one device profile item should exist');
 });
@@ -856,4 +869,169 @@ test('Scenario: Enrollment is audited through appendAudit', async (t) => {
   assert.notStrictEqual(auditItem.detail.hardwareUuid, returnedSecret);
   assert.notStrictEqual(auditItem.detail.platform, returnedSecret);
   assert.notStrictEqual(auditItem.detail.agentVersion, returnedSecret);
+});
+
+// ============================================================================
+// AC2: Enroll links enrollmentTokenId on device and adds deviceId to token's deviceIds
+// ============================================================================
+
+test('AC2 Scenario: Enroll stores enrollmentTokenId on device and deviceId in token deviceIds exactly once', async (t) => {
+  // Given a token with maxUses 3
+  const token = createEnrollmentToken();
+  const table = new FakeTable();
+  const now = new Date('2026-10-02T12:00:00Z');
+  const pepper = randomHex(32);
+
+  table.setItem({
+    ...enrollmentToken(token.tokenId),
+    tokenHash: token.tokenHash,
+    expiresAt: '2026-10-31T00:00:00Z',
+    maxUses: 3,
+    useCount: 0,
+    deviceIds: [],
+  });
+
+  const handler = createEnrollHandler({
+    table,
+    pepper,
+    now: () => now,
+    randomBytes: (size) => randomBytes(size),
+  });
+
+  // When the same hardware enrolls twice with it
+  const body = validEnrollBody();
+  const request1 = createEnrollRequest(token.presented, body);
+  const result1 = await handler(request1);
+  assert.strictEqual(result1.statusCode, 200);
+  const deviceId = result1.body.deviceId;
+
+  // Re-enroll the same device
+  const result2 = await handler(request1);
+  assert.strictEqual(result2.statusCode, 200);
+  assert.strictEqual(result2.body.deviceId, deviceId, 're-enroll returns same deviceId');
+
+  // Then the profile enrollmentTokenId is the tokenId
+  const profile = table.getItem(deviceProfile(deviceId));
+  assert.strictEqual(profile.enrollmentTokenId, token.tokenId);
+
+  // And the token deviceIds contains that deviceId exactly once
+  const tokenRecord = table.getItem(enrollmentToken(token.tokenId));
+  assert(Array.isArray(tokenRecord.deviceIds));
+  const count = tokenRecord.deviceIds.filter((id) => id === deviceId).length;
+  assert.strictEqual(count, 1, `deviceId should appear exactly once in deviceIds, but appears ${count} times`);
+});
+
+// ============================================================================
+// AC3: Revoked token cannot enroll
+// ============================================================================
+
+test('AC3 Scenario: Revoked token cannot enroll, returns 403 enrollment_token_revoked', async (t) => {
+  // Given a token record with revokedAt set
+  const token = createEnrollmentToken();
+  const table = new FakeTable();
+  const now = new Date('2026-10-02T12:00:00Z');
+  const pepper = randomHex(32);
+
+  table.setItem({
+    ...enrollmentToken(token.tokenId),
+    tokenHash: token.tokenHash,
+    expiresAt: '2026-10-31T00:00:00Z',
+    maxUses: 10,
+    useCount: 0,
+    revokedAt: '2026-10-01T00:00:00Z',
+    revokedBy: 'admin-user',
+  });
+
+  const handler = createEnrollHandler({
+    table,
+    pepper,
+    now: () => now,
+    randomBytes: (size) => randomBytes(size),
+  });
+
+  // When an agent enrolls with it
+  const body = validEnrollBody();
+  const request = createEnrollRequest(token.presented, body);
+  const result = await handler(request);
+
+  // Then the answer is 403 "enrollment_token_revoked"
+  assert.strictEqual(result.statusCode, 403);
+  assert.deepStrictEqual(result.body, { error: 'enrollment_token_revoked' });
+
+  // And no device, pointer or audit item is written and useCount is unchanged
+  const token_record = table.getItem(enrollmentToken(token.tokenId));
+  assert.strictEqual(token_record.useCount, 0, 'useCount should be unchanged');
+
+  // Verify no device was created
+  const deviceCalls = table.calls.filter((c) => c.operation === 'put' && c.item.pk && c.item.pk.startsWith('DEVICE'));
+  assert.strictEqual(deviceCalls.length, 0, 'no device should be written');
+});
+
+// ============================================================================
+// AC4: Re-enroll device with status "revoked" keeps status revoked, and check-in is refused
+// ============================================================================
+
+test('AC4 Scenario: Re-enrolling disabled device keeps status revoked', async (t) => {
+  // Given device D has status "revoked"
+  const token = createEnrollmentToken();
+  const table = new FakeTable();
+  const now = new Date('2026-10-02T12:00:00Z');
+  const pepper = randomHex(32);
+
+  const hwId = 'hw-test-001';
+
+  // First enrollment
+  table.setItem({
+    ...enrollmentToken(token.tokenId),
+    tokenHash: token.tokenHash,
+    expiresAt: '2026-10-31T00:00:00Z',
+    maxUses: 10,
+    useCount: 0,
+  });
+
+  const handler = createEnrollHandler({
+    table,
+    pepper,
+    now: () => now,
+    randomBytes: (size) => randomBytes(size),
+  });
+
+  const body = validEnrollBody({ hardwareUuid: hwId });
+  const request1 = createEnrollRequest(token.presented, body);
+  const result1 = await handler(request1);
+  assert.strictEqual(result1.statusCode, 200);
+  const deviceId = result1.body.deviceId;
+
+  // Now mark the device as revoked/disabled
+  const profile = table.getItem(deviceProfile(deviceId));
+  profile.status = 'revoked';
+  profile.disabledAt = '2026-10-02T11:00:00Z';
+  profile.disabledBy = 'admin';
+
+  // When D re-enrolls with a fresh token
+  const token2 = createEnrollmentToken();
+  table.setItem({
+    ...enrollmentToken(token2.tokenId),
+    tokenHash: token2.tokenHash,
+    expiresAt: '2026-10-31T00:00:00Z',
+    maxUses: 10,
+    useCount: 0,
+  });
+
+  const handler2 = createEnrollHandler({
+    table,
+    pepper,
+    now: () => now,
+    randomBytes: (size) => randomBytes(size),
+  });
+
+  const request2 = createEnrollRequest(token2.presented, body);
+  const result2 = await handler2(request2);
+  assert.strictEqual(result2.statusCode, 200);
+
+  // Then D still has status "revoked" and its signed check-in gets 403
+  const updatedProfile = table.getItem(deviceProfile(deviceId));
+  assert.strictEqual(updatedProfile.status, 'revoked', 'status should remain revoked after re-enroll');
+  assert.strictEqual(updatedProfile.disabledAt, '2026-10-02T11:00:00Z', 'disabledAt should be preserved');
+  assert.strictEqual(updatedProfile.disabledBy, 'admin', 'disabledBy should be preserved');
 });

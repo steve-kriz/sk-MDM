@@ -1,3 +1,14 @@
+// Package userauth signs a person in with their Entra ID account, once, so the
+// agent can mint a single-use enrollment token with the resulting access token.
+//
+// `mdmagent login` runs the OAuth 2.0 device authorization grant (RFC 8628)
+// against Entra (entra.go); the service's brokered browser sign-in
+// (agent/internal/signin) redeems an authorization code with its PKCE verifier
+// (codeflow.go). Either way the access token is used for exactly one request
+// and then dropped: nothing here stores or refreshes a token.
+//
+// Access tokens, refresh tokens and device codes are never logged, printed or
+// put in an error message.
 package userauth
 
 import (
@@ -19,9 +30,6 @@ const Authority = "https://login.microsoftonline.com"
 
 // DeviceCodeGrantType is the RFC 8628 grant polled for at sign-in.
 const DeviceCodeGrantType = "urn:ietf:params:oauth:grant-type:device_code"
-
-// RefreshGrantType is the grant a stored refresh token is redeemed with.
-const RefreshGrantType = "refresh_token"
 
 // DefaultPollInterval is the wait between polls when the device-code response
 // names no interval, or names 0.
@@ -45,12 +53,6 @@ var (
 	ErrSignInExpired = errors.New("sign-in code expired")
 	// ErrSignInFailed: any other sign-in failure.
 	ErrSignInFailed = errors.New("sign-in failed")
-	// ErrRefreshRejected: Entra answered invalid_grant; the refresh token is
-	// revoked or expired and only a new sign-in helps.
-	ErrRefreshRejected = errors.New("refresh token rejected")
-	// ErrRefreshUnavailable: the refresh could not be completed this time
-	// (a 5xx, a 429, a network error, an unreadable answer).
-	ErrRefreshUnavailable = errors.New("token refresh unavailable")
 )
 
 // Entra talks to the Entra ID OAuth endpoints over the injected HTTP doer,
@@ -249,34 +251,6 @@ func (e *Entra) PollToken(ctx context.Context, tenantID, clientID string, code D
 			return Token{}, ErrSignInFailed
 		}
 	}
-}
-
-// Refresh redeems refreshToken for a new access token, asking for scopes.
-// A 400 invalid_grant is ErrRefreshRejected; every other failure is
-// ErrRefreshUnavailable.
-func (e *Entra) Refresh(ctx context.Context, tenantID, clientID, refreshToken string, scopes []string) (Token, error) {
-	form := url.Values{}
-	form.Set("grant_type", RefreshGrantType)
-	form.Set("client_id", clientID)
-	form.Set("refresh_token", refreshToken)
-	form.Set("scope", strings.Join(scopes, " "))
-
-	status, body, err := e.postForm(ctx, tokenEndpoint(tenantID), form)
-	if err != nil {
-		return Token{}, ErrRefreshUnavailable
-	}
-
-	var reply tokenReply
-	if err := json.Unmarshal(body, &reply); err != nil {
-		return Token{}, ErrRefreshUnavailable
-	}
-	if status == http.StatusBadRequest && reply.Error == "invalid_grant" {
-		return Token{}, ErrRefreshRejected
-	}
-	if !isSuccess(status) || reply.Error != "" || reply.AccessToken == "" {
-		return Token{}, ErrRefreshUnavailable
-	}
-	return reply.token(), nil
 }
 
 // UsernameFromIDToken returns the `preferred_username` claim of an id token's

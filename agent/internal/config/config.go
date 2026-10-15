@@ -1,6 +1,8 @@
 // Package config reads and writes the agent's on-disk configuration: where to
-// send collections, the enrollment token to present once, how often to check in
-// and how much to log.
+// send collections, whether the machine is an OfficeHQ device or a BYOC one,
+// the Entra tenant and client the sign-in uses, the legacy enrollment token
+// when a silent install still carries one, how often to check in and how much
+// to log.
 //
 // Every file operation goes through platform.FileSystem, so the whole package
 // is testable without touching a real disk.
@@ -11,6 +13,7 @@ import (
 	"errors"
 	"io/fs"
 	"net/url"
+	"strings"
 
 	"github.com/officehq/sk-mdm/agent/internal/platform"
 )
@@ -25,6 +28,14 @@ const (
 	DefaultCheckInIntervalSeconds = 900
 	// DefaultLogLevel is the level the agent logs at unless told otherwise.
 	DefaultLogLevel = "info"
+)
+
+// Ownership values. Anything else in the file reads as OwnershipOfficeHQ.
+const (
+	// OwnershipOfficeHQ is a company-owned device; it is the default.
+	OwnershipOfficeHQ = "officehq"
+	// OwnershipBYOC is a personal device ("bring your own computer").
+	OwnershipBYOC = "byoc"
 )
 
 // FileMode is the mode the config file is written with: it carries the
@@ -51,8 +62,21 @@ type Config struct {
 	// CollectionURL is the base URL of the collection endpoint. It must be
 	// https: the enrollment token and the device secret travel over it.
 	CollectionURL string `json:"collectionUrl"`
-	// EnrollmentToken authenticates POST /api/v1/enroll, once.
+	// EnrollmentToken is optional. When present it authenticates
+	// POST /api/v1/enroll as X-MDM-Enrollment-Token. A legacy silent install
+	// may carry one; otherwise the browser sign-in (or `mdmagent login`)
+	// mints a single-use one and writes it with SetEnrollmentToken, and one
+	// the backend refuses is removed with ClearEnrollmentToken so a new
+	// sign-in is asked for.
 	EnrollmentToken string `json:"enrollmentToken"`
+	// Ownership is OwnershipOfficeHQ or OwnershipBYOC. Load turns an absent
+	// or unknown value into OwnershipOfficeHQ.
+	Ownership string `json:"ownership,omitempty"`
+	// TenantID and ClientID are the Entra tenant and the agent's public
+	// client, baked in at packaging. When either is empty the agent reads
+	// both from GET /api/v1/agent-auth/config.
+	TenantID string `json:"tenantId,omitempty"`
+	ClientID string `json:"clientId,omitempty"`
 	// CheckInIntervalSeconds is how often the agent checks in.
 	CheckInIntervalSeconds int `json:"checkInIntervalSeconds"`
 	// LogLevel is the lowest level written to the log file.
@@ -70,7 +94,8 @@ func Path(goos string) string {
 
 // Load reads and validates the config file at path.
 //
-// Absent checkInIntervalSeconds defaults to 900 and absent logLevel to "info".
+// Absent checkInIntervalSeconds defaults to 900, absent logLevel to "info",
+// and an ownership that is not exactly "officehq" or "byoc" to "officehq".
 // A collection URL that is empty, unparseable or not https is refused with
 // ErrCollectionURL; a missing file or malformed JSON is reported as the
 // underlying error.
@@ -95,7 +120,17 @@ func Load(fsys FileSystem, path string) (Config, error) {
 	if c.LogLevel == "" {
 		c.LogLevel = DefaultLogLevel
 	}
+	c.Ownership = NormalizeOwnership(c.Ownership)
 	return c, nil
+}
+
+// NormalizeOwnership returns raw when it is OwnershipOfficeHQ or
+// OwnershipBYOC, and OwnershipOfficeHQ for anything else.
+func NormalizeOwnership(raw string) string {
+	if raw == OwnershipBYOC {
+		return OwnershipBYOC
+	}
+	return OwnershipOfficeHQ
 }
 
 // Save writes c to path atomically: the JSON goes to path+".tmp" first and
@@ -140,6 +175,57 @@ func SetCollectionURL(fsys FileSystem, path, raw string) error {
 		return err
 	}
 
+	encoded, err := json.Marshal(raw)
+	if err != nil {
+		return err
+	}
+	return rewriteField(fsys, path, "collectionUrl", encoded)
+}
+
+// SetEnrollmentToken rewrites only the enrollmentToken field of the config
+// file at path, atomically, the way SetCollectionURL rewrites the URL. An empty
+// token removes the key altogether. A config file that does not exist yet is
+// created holding just the token. The token is never logged.
+func SetEnrollmentToken(fsys FileSystem, path, token string) error {
+	if token == "" {
+		return rewriteField(fsys, path, "enrollmentToken", nil)
+	}
+	encoded, err := json.Marshal(token)
+	if err != nil {
+		return err
+	}
+	return rewriteField(fsys, path, "enrollmentToken", encoded)
+}
+
+// ClearEnrollmentToken removes the enrollmentToken field from the config file
+// at path, so the next enrollment waits for a sign-in again.
+func ClearEnrollmentToken(fsys FileSystem, path string) error {
+	return SetEnrollmentToken(fsys, path, "")
+}
+
+// ReadEnrollmentToken returns the enrollmentToken field of the config file at
+// path, trimmed, and "" when the file has none. Unlike Load it validates
+// nothing else: it is read per enrollment, so a token the sign-in wrote after
+// the agent started is picked up without a restart.
+func ReadEnrollmentToken(fsys FileSystem, path string) (string, error) {
+	data, err := fsys.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var c struct {
+		EnrollmentToken string `json:"enrollmentToken"`
+	}
+	if err := json.Unmarshal(data, &c); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(c.EnrollmentToken), nil
+}
+
+// rewriteField sets one top-level key of the config file at path to value, or
+// removes it when value is nil, keeping every other key exactly as it is, and
+// writes the result atomically. A missing file is treated as an empty object;
+// a malformed one is refused and left alone.
+func rewriteField(fsys FileSystem, path, key string, value json.RawMessage) error {
 	fields := map[string]json.RawMessage{}
 	data, err := fsys.ReadFile(path)
 	switch {
@@ -147,17 +233,20 @@ func SetCollectionURL(fsys FileSystem, path, raw string) error {
 		if err := json.Unmarshal(data, &fields); err != nil {
 			return err
 		}
+		if fields == nil {
+			fields = map[string]json.RawMessage{}
+		}
 	case errors.Is(err, fs.ErrNotExist):
 		// A fresh install: write the first version of the file.
 	default:
 		return err
 	}
 
-	encoded, err := json.Marshal(raw)
-	if err != nil {
-		return err
+	if value == nil {
+		delete(fields, key)
+	} else {
+		fields[key] = value
 	}
-	fields["collectionUrl"] = encoded
 
 	out, err := json.MarshalIndent(fields, "", "  ")
 	if err != nil {

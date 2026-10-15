@@ -11,12 +11,16 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/officehq/sk-mdm/agent/internal/agentactions"
+	"github.com/officehq/sk-mdm/agent/internal/agenterrors"
+	"github.com/officehq/sk-mdm/agent/internal/analytics"
 	"github.com/officehq/sk-mdm/agent/internal/antivirus"
 	"github.com/officehq/sk-mdm/agent/internal/client"
 	"github.com/officehq/sk-mdm/agent/internal/config"
 	"github.com/officehq/sk-mdm/agent/internal/contract"
 	"github.com/officehq/sk-mdm/agent/internal/enforce"
 	"github.com/officehq/sk-mdm/agent/internal/executor"
+	"github.com/officehq/sk-mdm/agent/internal/heartbeat"
 	"github.com/officehq/sk-mdm/agent/internal/inventory"
 	"github.com/officehq/sk-mdm/agent/internal/logging"
 	"github.com/officehq/sk-mdm/agent/internal/platform"
@@ -24,9 +28,9 @@ import (
 	"github.com/officehq/sk-mdm/agent/internal/posture"
 	"github.com/officehq/sk-mdm/agent/internal/scheduler"
 	"github.com/officehq/sk-mdm/agent/internal/service"
+	"github.com/officehq/sk-mdm/agent/internal/signin"
 	"github.com/officehq/sk-mdm/agent/internal/state"
 	"github.com/officehq/sk-mdm/agent/internal/update"
-	"github.com/officehq/sk-mdm/agent/internal/userauth"
 	"github.com/officehq/sk-mdm/agent/internal/version"
 )
 
@@ -107,10 +111,6 @@ type agentEnv struct {
 	// means the agent cannot update itself, and an advertised release is
 	// left alone.
 	BinaryPath string
-
-	// Protector decrypts the user token vault. Nil means the host's
-	// platform.SecretProtector.
-	Protector platform.SecretProtector
 }
 
 // agent is the assembled agent: the dependencies one check-in cycle runs from,
@@ -121,6 +121,21 @@ type agent struct {
 	logger  *logging.Logger
 	clock   platform.Clock
 	updates *update.Deps
+	// signin is the brokered sign-in the service runs alongside the loop.
+	signin *signin.Broker
+	// heartbeat is the per-device performance heartbeat loop run alongside
+	// the scheduler; nil runs no heartbeat.
+	heartbeat *heartbeat.Deps
+	// fs and goos locate the leftovers of earlier versions removed at start.
+	fs   platform.FileSystem
+	goos string
+	// restartPending is set by settleUpdate when a rollback put the old
+	// binary back: Start then returns service.ErrRestartRequired without
+	// running anything, so the service manager restarts the agent onto it.
+	restartPending bool
+	// actions is the buffer of agent actions carried on the next check-in;
+	// settleUpdate records a rollback an earlier process performed into it.
+	actions *agentactions.Buffer
 }
 
 // newAgent assembles the production agent: the config and the state the
@@ -140,6 +155,13 @@ func newAgent(env agentEnv) (*agent, error) {
 	store := state.NewStore(env.FS, env.StatePath)
 	logger := logging.New(env.FS, env.Clock, agentLogPath(env.GOOS),
 		logging.ParseLevel(cfg.LogLevel), "agent")
+	// Every warn and error record, from this logger and every one made from
+	// it, is buffered for the next check-in. Attached before any With call.
+	agentErrors := agenterrors.New()
+	logger.SetSink(agentErrors)
+	// The actions the agent performs on the device (TASK-070) are buffered
+	// for the next check-in, the same way.
+	agentActions := agentactions.New(env.Clock)
 
 	transport := client.New(cfg, store, env.Doer, env.Clock)
 	transport.Logger = logger.With("client")
@@ -149,16 +171,31 @@ func newAgent(env agentEnv) (*agent, error) {
 		AgentVersion: version.Version,
 	}
 
-	// The signed-in user's token rides on every signed request while one is
-	// held. The vault is the one `mdmagent login` writes; it is read per call.
-	protector := env.Protector
-	if protector == nil {
-		protector = newProtector()
+	// The enrollment token is read from the config file at every enrollment,
+	// because the sign-in writes it there while the agent runs, and a
+	// rejected one is removed from there.
+	transport.EnrollmentToken = func() string {
+		token, err := config.ReadEnrollmentToken(env.FS, env.ConfigPath)
+		if err != nil {
+			return ""
+		}
+		return token
 	}
-	userSession := userauth.NewSession(
-		userauth.NewVault(env.FS, protector, userauth.VaultPath(env.GOOS)),
-		env.Doer, env.Clock, logger.With("userauth"))
-	transport.Bearer = userSession
+
+	// The brokered browser sign-in mints that token and wakes the loop, so
+	// an enrollment waiting for a user happens straight away.
+	signInWake := make(chan struct{}, 1)
+	signInBroker := newSignInBroker(cfg, env.GOOS, env.ConfigPath, transport, store, env.FS, env.Doer, env.Clock,
+		logger.With("signin"), signInWake)
+
+	// Who is logged in to the operating system is reported after every
+	// check-in.
+	users := &userReporter{
+		transport: transport,
+		runner:    env.Runner,
+		goos:      env.GOOS,
+		logger:    logger.With("usersession"),
+	}
 
 	commands := &executor.Deps{
 		Runner: env.Runner,
@@ -168,6 +205,10 @@ func newAgent(env agentEnv) (*agent, error) {
 		GOOS:   env.GOOS,
 		Client: transport,
 		Store:  executor.NewStore(env.FS, executor.StorePath(env.GOOS)),
+		// Application installers (TASK-049) are fetched with a plain GET from
+		// a presigned or registered URL, on their own long-timeout client; the
+		// signed requests keep env.Doer and its short timeout.
+		Downloader: platform.NewHTTPClient(executor.ApplicationDownloadTimeout),
 	}
 
 	// The self-update: how a replaced binary is installed, and the restart
@@ -181,6 +222,7 @@ func newAgent(env agentEnv) (*agent, error) {
 			Doer:   env.Doer,
 			Logger: logger.With("update"),
 			Path:   env.BinaryPath,
+			Clock:  env.Clock,
 			Restart: func(ctx context.Context) error {
 				return service.Restart(ctx, service.Config{
 					FS:         env.FS,
@@ -191,6 +233,14 @@ func newAgent(env agentEnv) (*agent, error) {
 			},
 		}
 	}
+
+	// One scanner per agent: its in-flight guard and last record must
+	// survive from one cycle to the next, so it is not rebuilt in Enforce.
+	scanner := antivirus.NewScanner(env.Runner, env.Clock, env.FS, env.GOOS,
+		logger.With("enforce"), antivirus.ScanStatePath(env.GOOS))
+	// One Defender hardener per agent, for the same reason: its last block and
+	// signature update retry window live across cycles.
+	hardener := antivirus.NewHardener(env.Runner, env.Clock, env.GOOS)
 
 	deps := &scheduler.Deps{
 		Client:          transport,
@@ -212,10 +262,40 @@ func newAgent(env agentEnv) (*agent, error) {
 			}
 			return inv, err
 		},
+		// The first enrollment comes before the first collection, so the
+		// machine is described here first; once known it is not re-collected.
+		BeforeEnroll: func() {
+			if transport.Host.OSVersion != "" && transport.Host.HardwareUUID != "" {
+				return
+			}
+			inv, err := inventory.Collect(env.Runner, env.Clock, env.GOOS)
+			if err != nil {
+				logger.With("scheduler").Warn("could not describe the device before enrolling",
+					logging.F("error", err.Error()))
+				return
+			}
+			transport.Host.OSVersion = inv.OS.Version
+			transport.Host.HardwareUUID = inv.Hardware.SerialNumber
+		},
 		CollectPosture: func() (contract.Posture, error) {
 			return posture.Collect(env.Runner, env.Clock, env.GOOS)
 		},
-		Evaluate: policy.Evaluate,
+		// Endpoint analytics report crashes from the watermark onwards; the
+		// watermark has its own file, so clearing the credential keeps it.
+		CollectAnalytics: func(since time.Time) (contract.Analytics, time.Time, error) {
+			return analytics.Collect(env.Runner, env.Clock, env.GOOS, since)
+		},
+		AnalyticsWatermark: analytics.NewWatermarkStore(env.FS, analytics.WatermarkPath(env.GOOS)),
+		// The last scheduled scan's result rides on every check-in.
+		CollectAntivirusScan: scanner.Last,
+		// The hardener's block from this cycle's Enforce rides on the same
+		// check-in, and its failures become policy violations.
+		CollectDefenderHardening: hardener.Last,
+		// The agent's own warn and error records ride on the next check-in.
+		CollectAgentErrors: agentErrors.Collect,
+		// The actions the agent performed ride on the same check-in.
+		CollectAgentActions: agentActions.Collect,
+		Evaluate:            policy.Evaluate,
 		// The settings the bundle asks for are made true on the machine
 		// after they have been evaluated, so this cycle reports the posture
 		// as found and the next one reports the result.
@@ -223,8 +303,16 @@ func newAgent(env agentEnv) (*agent, error) {
 			enforceLogger := logger.With("enforce")
 			// The antivirus enforcer needs the clock, which Defaults does not
 			// take, so it follows the default list rather than joining it.
-			enforcers := append(enforce.Defaults(env.Runner, env.FS, env.GOOS, enforceLogger),
-				antivirus.NewEnforcer(env.Runner, env.Clock, env.GOOS))
+			// The Defender hardener follows it. The scanner comes last and
+			// only ever starts a background scan.
+			// The firewall, domains and antivirus enforcers record what they
+			// turned on into the action buffer.
+			antivirusEnforcer := antivirus.NewEnforcer(env.Runner, env.Clock, env.GOOS)
+			antivirusEnforcer.Actions = agentActions.Record
+			enforcers := append(enforce.DefaultsWithActions(env.Runner, env.FS, env.GOOS, enforceLogger, agentActions.Record),
+				antivirusEnforcer,
+				hardener,
+				scanner)
 			enforce.Run(ctx, enforcers, effective, pst, enforceLogger)
 		},
 	}
@@ -238,9 +326,9 @@ func newAgent(env agentEnv) (*agent, error) {
 		if err != nil {
 			return err
 		}
-		// The signed-in user is reported first; whatever comes of it, the
+		// The console user is reported first; whatever comes of it, the
 		// command poll still runs this cycle.
-		reportUserSession(ctx, transport, userSession, st.DeviceID, logger.With("userauth"))
+		users.report(ctx, st.DeviceID)
 		commands.DeviceID = st.DeviceID
 		return executor.Poll(ctx, commands)
 	}
@@ -251,7 +339,31 @@ func newAgent(env agentEnv) (*agent, error) {
 		}
 	}
 
-	return &agent{deps: deps, logger: logger, clock: env.Clock, updates: updates}, nil
+	// The per-device heartbeat (TASK-044): its own loop on the same transport,
+	// store and clock, told the interval by every decoded check-in response.
+	beat := &heartbeat.Deps{
+		Client: transport,
+		Store:  store,
+		Clock:  env.Clock,
+		Logger: logger.With("heartbeat"),
+		Collect: func() (contract.AnalyticsPerformance, []string) {
+			return analytics.CollectPerformance(env.Runner, env.Clock, env.GOOS)
+		},
+		CollectNetwork: func() ([]contract.HeartbeatNetworkAdapter, []string) {
+			return analytics.CollectNetwork(env.Runner, env.Clock, env.GOOS)
+		},
+	}
+	deps.OnHeartbeatInterval = beat.SetInterval
+
+	deps.SignInWake = signInWake
+	// A rejected enrollment token is removed from the config, so the
+	// sign-in asks for a new one.
+	deps.ClearEnrollmentToken = func() error {
+		return config.ClearEnrollmentToken(env.FS, env.ConfigPath)
+	}
+
+	return &agent{deps: deps, logger: logger, clock: env.Clock, updates: updates, signin: signInBroker,
+		heartbeat: beat, fs: env.FS, goos: env.GOOS, actions: agentActions}, nil
 }
 
 // settleUpdate finishes whatever the previous process started: an update that
@@ -265,9 +377,30 @@ func (a *agent) settleUpdate() {
 	if a.updates == nil {
 		return
 	}
-	if err := update.RollbackIfUnhealthy(a.updates); err != nil {
+	err := update.RollbackIfUnhealthy(a.updates)
+	switch {
+	case err == nil:
+	case errors.Is(err, service.ErrRestartRequired):
+		// The old binary is back in place; the process must exit so the
+		// service manager starts it. Not a failure.
+		a.restartPending = true
+	default:
 		a.log("update could not be settled: " + err.Error())
 	}
+
+	// A rollback an earlier process performed is reported by this one. The
+	// process that has just rolled back leaves its record for the next one.
+	if a.restartPending {
+		return
+	}
+	rec, ok := update.TakeRollbackRecord(a.updates)
+	if !ok || a.actions == nil {
+		return
+	}
+	a.actions.RecordAt(contract.ActionAgentUpdateRolledBack, map[string]string{
+		"installedVersion": rec.InstalledVersion,
+		"runningVersion":   rec.RunningVersion,
+	}, rec.OccurredAt)
 }
 
 // hooks is the agent as the service state machine drives it: the scheduler loop
@@ -275,7 +408,30 @@ func (a *agent) settleUpdate() {
 func (a *agent) hooks() service.Hooks {
 	return service.Hooks{
 		Start: func(ctx context.Context) error {
-			a.log("agent started")
+			if a.logger != nil {
+				// The version says which build is running, so a stale
+				// reinstall or an auto-update shows in the log.
+				_ = a.logger.Log(logging.LevelInfo, "agent started", logging.F("version", version.Version))
+			}
+			if a.restartPending {
+				// A rollback restored the previous build: nothing runs
+				// on this one, the service manager restarts onto it.
+				return service.ErrRestartRequired
+			}
+			if a.fs != nil {
+				// Earlier versions kept the user's Entra tokens; none
+				// is kept any more.
+				removeLegacyVault(a.fs, a.goos, a.logger)
+			}
+			if a.signin != nil {
+				// The sign-in polls for as long as the loop runs, and
+				// does nothing once the device is enrolled.
+				go a.signin.Run(ctx)
+			}
+			if a.heartbeat != nil {
+				// The heartbeat idles until a check-in turns it on.
+				go func() { _ = heartbeat.Run(ctx, a.heartbeat) }()
+			}
 			return scheduler.Run(ctx, a.deps)
 		},
 		Stop: func() {
@@ -329,9 +485,10 @@ func runAgent(fsys platform.FileSystem, goos string, args []string, stdout, stde
 		binary = ""
 	}
 
+	runner := newRunner()
 	agent, err := newAgent(agentEnv{
 		FS:         fsys,
-		Runner:     newRunner(),
+		Runner:     runner,
 		Clock:      newClock(),
 		Doer:       newDoer(),
 		GOOS:       goos,
@@ -355,6 +512,18 @@ func runAgent(fsys platform.FileSystem, goos string, args []string, stdout, stde
 	hooks := agent.hooks()
 
 	if managed() {
+		if goos == "windows" {
+			// Re-applied at every managed start, so a service registered
+			// by an older installer gets the recovery actions that
+			// restart it after an update. A failure costs one warning.
+			if err := service.EnsureRecovery(context.Background(), service.Config{
+				Runner: runner,
+				GOOS:   goos,
+			}); err != nil && agent.logger != nil {
+				_ = agent.logger.Log(logging.LevelWarn, "service recovery could not be configured",
+					logging.F("error", err.Error()))
+			}
+		}
 		if err := dispatch(context.Background(), hooks); err != nil {
 			fmt.Fprintln(stderr, err)
 			return exitError
@@ -367,6 +536,12 @@ func runAgent(fsys platform.FileSystem, goos string, args []string, stdout, stde
 
 	fmt.Fprintf(stdout, "mdmagent %s running\n", version.Version)
 	if err := service.Run(ctx, hooks); err != nil {
+		if errors.Is(err, service.ErrRestartRequired) {
+			// Under launchd, KeepAlive restarts the job; in a console
+			// nothing does, and the operator is told why it ended.
+			fmt.Fprintln(stdout, "mdmagent restarting to apply an update")
+			return exitRestart
+		}
 		fmt.Fprintln(stderr, err)
 		return exitError
 	}

@@ -2,23 +2,119 @@
 set -e
 # Runs as root at the end of the package install.
 #
-# It writes the agent config from the values the build substituted into this
-# script, locks that file down because it carries the enrollment token, and
-# only then bootstraps the LaunchDaemon: the agent must never start able to
-# read a config other accounts could have read or rewritten first.
+#   1. Finds the user at the console. root or loginwindow there (or a
+#      command-line install, `installer -pkg ...`) means nobody to ask: the
+#      baked collection URL and an OfficeHQ device are used.
+#   2. With a console user, asks them, in their own GUI session, for the
+#      collection URL (pre-filled with the baked one, asked again until it is
+#      https) and the device type. Cancelling either question keeps the baked
+#      defaults; it never fails the install.
+#   3. Writes the agent config, locks it down and only then bootstraps the
+#      LaunchDaemon: the agent must never start able to read a config other
+#      accounts could have read or rewritten first.
+#   4. With a console user, runs `mdmagent open-signin` as them, in the
+#      background: it waits for the sign-in URL the daemon requests from the
+#      MDM site and opens it in their browser. The agent enrolls itself with
+#      the token of whoever signs in. A failure is ignored: the install has
+#      succeeded, and /Applications/OfficeHQ/Sign in to OfficeHQ MDM.command
+#      signs in later.
 #
-# The two placeholders in the config below are replaced by
-# installers/macos/build.sh when it stages this script into the package.
-# set -e above means any failing step below aborts the install with a non-zero
-# status rather than leaving a half-configured daemon loaded.
+# The three placeholders below are replaced by installers/macos/build.sh when
+# it stages this script into the package.
+# set -e above means any failing step that is not explicitly tolerated aborts
+# the install with a non-zero status rather than leaving a half-configured
+# daemon loaded.
+
+BAKED_COLLECTION_URL="__COLLECTION_URL__"
+TENANT_ID="__TENANT_ID__"
+CLIENT_ID="__CLIENT_ID__"
+OFFICEHQ_DEVICE="OfficeHQ device"
+BYOC_DEVICE="BYOC (personal device)"
+
+COLLECTION_URL="$BAKED_COLLECTION_URL"
+OWNERSHIP="officehq"
+
+CONSOLE_USER="$(stat -f%Su /dev/console 2>/dev/null || true)"
+case "$CONSOLE_USER" in
+  ""|root|loginwindow) CONSOLE_USER="" ;;
+esac
+if [ -n "$COMMAND_LINE_INSTALL" ]; then
+  CONSOLE_USER=""
+fi
+
+# Runs a command as the console user, inside their login session, so dialogs
+# and the browser appear on their screen.
+as_console_user() {
+  launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" "$@"
+}
+
+# True when $1 can be the collection URL: https with a host, and nothing that
+# would need escaping in config.json.
+is_collection_url() {
+  case "$1" in
+    *[\"\\[:space:]]*) return 1 ;;
+    https://[A-Za-z0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Prints the URL the user entered; fails when they cancel or walk away.
+# $1 is the prompt, $2 the default answer. Both travel as arguments, never as
+# AppleScript source.
+ask_collection_url() {
+  as_console_user osascript \
+    -e 'on run argv' \
+    -e 'set reply to display dialog (item 1 of argv) default answer (item 2 of argv) with title "OfficeHQ MDM" buttons {"Cancel", "Continue"} default button "Continue" cancel button "Cancel" giving up after 600' \
+    -e 'if gave up of reply then error number -128' \
+    -e 'return text returned of reply' \
+    -e 'end run' \
+    "$1" "$2"
+}
+
+# Prints the device type the user picked, or nothing when they cancel.
+ask_ownership() {
+  as_console_user osascript \
+    -e 'on run argv' \
+    -e 'set picked to choose from list {item 1 of argv, item 2 of argv} with title "OfficeHQ MDM" with prompt "What kind of device is this?" default items {item 1 of argv} OK button name "Continue" cancel button name "Cancel"' \
+    -e 'if picked is false then return ""' \
+    -e 'return item 1 of picked' \
+    -e 'end run' \
+    "$OFFICEHQ_DEVICE" "$BYOC_DEVICE"
+}
+
+if [ -n "$CONSOLE_USER" ]; then
+  CONSOLE_UID="$(id -u "$CONSOLE_USER")"
+
+  PROMPT="OfficeHQ MDM collection URL:"
+  ANSWER="$BAKED_COLLECTION_URL"
+  while :; do
+    if ! ANSWER="$(ask_collection_url "$PROMPT" "$ANSWER")"; then
+      # Cancelled: keep the baked URL.
+      ANSWER="$BAKED_COLLECTION_URL"
+      break
+    fi
+    if is_collection_url "$ANSWER"; then
+      break
+    fi
+    PROMPT="The collection URL must start with https://. OfficeHQ MDM collection URL:"
+  done
+  COLLECTION_URL="$ANSWER"
+
+  CHOICE="$(ask_ownership)" || CHOICE=""
+  if [ "$CHOICE" = "$BYOC_DEVICE" ]; then
+    OWNERSHIP="byoc"
+  fi
+fi
 
 mkdir -p "/Library/Application Support/OfficeHQ/MDM"
 mkdir -p /Library/Logs/OfficeHQ
 
 cat > "/Library/Application Support/OfficeHQ/MDM/config.json" <<EOF
 {
-  "collectionUrl": "__COLLECTION_URL__",
-  "enrollmentToken": "__ENROLL_TOKEN__",
+  "collectionUrl": "$COLLECTION_URL",
+  "ownership": "$OWNERSHIP",
+  "tenantId": "$TENANT_ID",
+  "clientId": "$CLIENT_ID",
   "checkInIntervalSeconds": 900,
   "logLevel": "info"
 }
@@ -34,5 +130,11 @@ chown root:wheel /Library/LaunchDaemons/au.com.officehq.mdmagent.plist
 chmod 644 /Library/LaunchDaemons/au.com.officehq.mdmagent.plist
 
 launchctl bootstrap system /Library/LaunchDaemons/au.com.officehq.mdmagent.plist
+
+if [ -n "$CONSOLE_USER" ]; then
+  # Detached, so the installer finishes while open-signin waits (up to 30 s)
+  # for the daemon's sign-in URL; its exit status is never looked at.
+  launchctl asuser "$CONSOLE_UID" sudo -u "$CONSOLE_USER" /usr/local/bin/mdmagent open-signin >/dev/null 2>&1 &
+fi
 
 exit 0

@@ -429,3 +429,124 @@ func TestStateReportingOrder(t *testing.T) {
 		}
 	}
 }
+
+// ----------------------------------------------------------------------------
+// TASK-061: self-update exit-to-restart
+//
+// E2E cucumber-style scenarios (Given/When/Then, from the ticket's Gherkin),
+// using agent/internal/platform/fake so nothing here opens a real process,
+// network connection or database.
+// ----------------------------------------------------------------------------
+
+// AC1: Restart runs no service-manager command on either platform.
+func TestScenario_AC1_RestartRunsNoCommandOnEitherPlatform(t *testing.T) {
+	for _, goos := range []string{"windows", "darwin"} {
+		t.Run(goos, func(t *testing.T) {
+			// Given a fake command runner that records every call and answers
+			// exit code 0 by default
+			runner := fake.NewCommandRunner()
+			// And a service config with GOOS "<goos>"
+			cfg := Config{Runner: runner, GOOS: goos, BinaryPath: "/bin/mdmagent"}
+
+			// When service.Restart is called
+			err := Restart(context.Background(), cfg)
+
+			// Then the returned error matches service.ErrRestartRequired
+			if !errors.Is(err, ErrRestartRequired) {
+				t.Fatalf("Restart returned %v, want ErrRestartRequired", err)
+			}
+			// And the runner recorded 0 calls: no sc.exe stop, sc.exe start or
+			// launchctl kickstart is issued.
+			if calls := runner.Calls(); len(calls) != 0 {
+				t.Fatalf("runner recorded %d calls, want 0: %v", len(calls), calls)
+			}
+		})
+	}
+}
+
+// AC5: The service state machine reports a restart as a stop with no stop
+// request.
+func TestScenario_AC5_RestartSentinelReportsStopWithNoStopRequest(t *testing.T) {
+	clock := fake.NewClock(time.Now())
+	states := []State{}
+	stopCalled := 0
+	shutdownCalled := 0
+
+	hooks := Hooks{
+		// Given hooks whose Start returns service.ErrRestartRequired
+		Start: func(ctx context.Context) error {
+			return ErrRestartRequired
+		},
+		Stop:     func() { stopCalled++ },
+		Shutdown: func() { shutdownCalled++ },
+		Report:   func(s State) { states = append(states, s) },
+		Clock:    clock,
+	}
+
+	// When service.Run is called
+	err := Run(context.Background(), hooks)
+
+	// Then the reported states are exactly "start pending", "running", "stopped"
+	want := []State{StateStartPending, StateRunning, StateStopped}
+	if len(states) != len(want) {
+		t.Fatalf("states = %v, want %v", states, want)
+	}
+	for i, w := range want {
+		if states[i] != w {
+			t.Errorf("states[%d] = %v, want %v", i, states[i], w)
+		}
+	}
+	// And Stop and Shutdown were each called 0 times
+	if stopCalled != 0 {
+		t.Errorf("Stop called %d times, want 0", stopCalled)
+	}
+	if shutdownCalled != 0 {
+		t.Errorf("Shutdown called %d times, want 0", shutdownCalled)
+	}
+	// And service.Run returns an error matching service.ErrRestartRequired
+	if !errors.Is(err, ErrRestartRequired) {
+		t.Errorf("Run returned %v, want ErrRestartRequired", err)
+	}
+}
+
+// AC6: The SCM exit status for each way the service ends. ExecuteExit carries
+// no build constraint, so it is a plain unit test.
+func TestUnit_AC6_ExecuteExit(t *testing.T) {
+	cases := []struct {
+		name     string
+		err      error
+		wantSSEC bool
+		wantCode uint32
+	}{
+		{"nil", nil, false, 0},
+		{"restart sentinel", ErrRestartRequired, true, ExitRestart},
+		{"any other error", errors.New("boom"), true, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ssec, code := ExecuteExit(tc.err)
+			if ssec != tc.wantSSEC || code != tc.wantCode {
+				t.Errorf("ExecuteExit(%v) = (%v, %v), want (%v, %v)", tc.err, ssec, code, tc.wantSSEC, tc.wantCode)
+			}
+		})
+	}
+}
+
+// AC17: Only x/sys's final update reports STOPPED to the SCM. forwardsToSCM
+// carries no build constraint, so it is a plain unit test.
+func TestUnit_AC17_ForwardsToSCM(t *testing.T) {
+	cases := []struct {
+		state     State
+		forwarded bool
+	}{
+		{StateStartPending, true},
+		{StateRunning, true},
+		{StateStopPending, true},
+		{StateStopped, false},
+	}
+	for _, tc := range cases {
+		if got := forwardsToSCM(tc.state); got != tc.forwarded {
+			t.Errorf("forwardsToSCM(%v) = %v, want %v", tc.state, got, tc.forwarded)
+		}
+	}
+}

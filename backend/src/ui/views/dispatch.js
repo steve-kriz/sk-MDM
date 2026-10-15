@@ -25,7 +25,7 @@ export const COMMAND_TYPES = ['run_script', 'restart', 'lock', 'install_package'
 export const CONFIRM_REQUIRED_TYPES = ['restart', 'run_script'];
 
 /** The interpreters a `run_script` payload may name. */
-export const SCRIPT_INTERPRETERS = ['powershell', 'zsh'];
+export const SCRIPT_INTERPRETERS = ['powershell', 'zsh', 'cmd', 'bash'];
 
 /** True when a value is a string with something in it. */
 function filled(value) {

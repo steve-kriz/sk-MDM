@@ -81,6 +81,15 @@ func Defaults(runner platform.CommandRunner, fsys platform.FileSystem, goos stri
 	}
 }
 
+// DefaultsWithActions is the same list as Defaults, with actions set as the
+// Actions recorder of both the firewall and the domains enforcer.
+func DefaultsWithActions(runner platform.CommandRunner, fsys platform.FileSystem, goos string, logger *logging.Logger, actions func(actionType string, details map[string]string)) []Enforcer {
+	return []Enforcer{
+		&Firewall{Runner: runner, GOOS: goos, Actions: actions},
+		&Domains{Runner: runner, FS: fsys, GOOS: goos, Logger: logger, Actions: actions},
+	}
+}
+
 // warn writes one warning, or nothing when there is no logger.
 func warn(logger *logging.Logger, msg string, fields ...logging.Field) {
 	if logger == nil {

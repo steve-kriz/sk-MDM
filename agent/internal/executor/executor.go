@@ -46,6 +46,9 @@ const (
 	TypeInstallPackage   = "install_package"
 	TypeUninstallPackage = "uninstall_package"
 	TypeCollectLogs      = "collect_logs"
+	// TypeInstallApplication installs an application from the backend's
+	// application safe list (TASK-049).
+	TypeInstallApplication = "install_application"
 )
 
 // The two result statuses the backend accepts.
@@ -82,7 +85,29 @@ const (
 	ErrExecutionFailed = "execution_failed"
 	// ErrLogsFailed is a log archive that could not be built or written.
 	ErrLogsFailed = "logs_failed"
+	// ErrUnsupportedInterpreter is a run_script interpreter that is valid,
+	// but not on this platform (cmd/powershell on macOS, bash/zsh on Windows).
+	ErrUnsupportedInterpreter = "unsupported_interpreter"
+	// ErrApplicationUnavailable is an install_application whose application
+	// the backend no longer has (deleted after the install was queued).
+	ErrApplicationUnavailable = "application_unavailable"
+	// ErrDownloadFailed is an application whose download details or bytes
+	// could not be fetched.
+	ErrDownloadFailed = "download_failed"
+	// ErrDownloadTooLarge is an application download past MaxApplicationBytes.
+	ErrDownloadTooLarge = "download_too_large"
+	// ErrChecksumMismatch is a downloaded application whose SHA-256 is not
+	// the one the backend registered for it.
+	ErrChecksumMismatch = "checksum_mismatch"
 )
+
+// MaxApplicationBytes is the largest application installer the agent will
+// download (2 GiB); a larger one is refused and nothing is run.
+const MaxApplicationBytes = 2147483648
+
+// ApplicationDownloadTimeout bounds one whole application download, body
+// included. It is the timeout of the Downloader the agent is wired with.
+const ApplicationDownloadTimeout = 30 * time.Minute
 
 // Temp directory locations, beside the config, state and spool the installer
 // creates. Scripts and log archives are written here, never to a world-
@@ -152,6 +177,11 @@ type Deps struct {
 	// MaxCommands is how many commands one lease asks for; zero means
 	// DefaultMaxCommands.
 	MaxCommands int
+
+	// Downloader fetches application installers from their (presigned or
+	// registered) URL with a plain, unsigned GET. Nil refuses every
+	// install_application with download_failed.
+	Downloader platform.HTTPDoer
 }
 
 // TempDir returns the scratch directory for a GOOS value: the Windows path for
@@ -183,6 +213,8 @@ func Execute(ctx context.Context, cmd Command, deps *Deps) contract.CommandResul
 		return uninstallPackage(ctx, cmd, deps)
 	case TypeCollectLogs:
 		return collectLogs(cmd, deps)
+	case TypeInstallApplication:
+		return installApplication(ctx, cmd, deps)
 	default:
 		return deps.fail(ErrUnsupportedType, "")
 	}
@@ -220,6 +252,10 @@ func ResultPath(deviceID, commandID string) string {
 // top of the next cycle; a command already in the store is reported from it
 // rather than run again; and a lease that fails costs this cycle's commands,
 // not the cycle.
+//
+// A command whose payload carries stopOnFailure: true and whose result is
+// failed — fresh or replayed from the store — stops the batch: the rest of the
+// leased commands are not run, not recorded and not reported.
 func Poll(ctx context.Context, deps *Deps) error {
 	if deps == nil {
 		return errors.New("executor: nil deps")
@@ -241,7 +277,13 @@ func Poll(ctx context.Context, deps *Deps) error {
 		return nil
 	}
 	for _, cmd := range commands {
-		deps.handle(ctx, cmd)
+		result := deps.handle(ctx, cmd)
+		if result.Status == StatusFailed && stopOnFailure(cmd.Payload) {
+			deps.log(logging.LevelInfo, "command failed with stopOnFailure; batch stopped",
+				logging.F("commandId", cmd.CommandID),
+			)
+			break
+		}
 	}
 	return nil
 }
@@ -288,7 +330,10 @@ func (d *Deps) lease() ([]Command, bool) {
 //
 // A command the store has seen is never run again: the backend leasing it a
 // second time means it did not get the result, so it gets the stored one.
-func (d *Deps) handle(ctx context.Context, cmd Command) {
+//
+// It returns the result it reported, fresh or stored, so Poll can stop the
+// batch after a flagged failure.
+func (d *Deps) handle(ctx context.Context, cmd Command) contract.CommandResultRequest {
 	record, found, err := d.Store.Lookup(cmd.CommandID)
 	if err != nil {
 		d.log(logging.LevelWarn, "command store unreadable", logging.F("error", err.Error()))
@@ -298,7 +343,7 @@ func (d *Deps) handle(ctx context.Context, cmd Command) {
 			logging.F("commandId", cmd.CommandID),
 		)
 		d.deliver(record.CommandID, record.Result)
-		return
+		return record.Result
 	}
 
 	result := Execute(ctx, cmd, d)
@@ -312,6 +357,7 @@ func (d *Deps) handle(ctx context.Context, cmd Command) {
 		)
 	}
 	d.deliver(cmd.CommandID, result)
+	return result
 }
 
 // retryResults posts every result an earlier cycle could not.
@@ -345,7 +391,7 @@ func (d *Deps) deliver(commandID string, result contract.CommandResultRequest) {
 //
 // A 4xx counts as done: the backend understood the body and refused it, and
 // sending the same bytes again next cycle would be refused again. A transport
-// failure or a 5xx is not done, and is retried.
+// failure, a 5xx, a 408 or a 429 is not done, and is retried.
 func (d *Deps) postResult(commandID string, result contract.CommandResultRequest) bool {
 	body, err := json.Marshal(result)
 	if err != nil {
@@ -374,7 +420,9 @@ func (d *Deps) postResult(commandID string, result contract.CommandResultRequest
 			logging.F("status", result.Status),
 		)
 		return true
-	case status >= 500:
+	case status >= 500 || status == http.StatusRequestTimeout || status == http.StatusTooManyRequests:
+		// 408 and 429 say "not now", not "never": the result is kept and
+		// retried, like a 5xx.
 		d.log(logging.LevelWarn, "command result failed",
 			logging.F("commandId", commandID),
 			logging.F("status", status),

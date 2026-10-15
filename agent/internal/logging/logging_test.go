@@ -401,6 +401,125 @@ func TestLogger_EncodesTimestampAsISO8601(t *testing.T) {
 	}
 }
 
+// ============================================================================
+// TASK-063: Sink -- every warn/error record, including those from a logger
+// made with With, reaches the attached sink; below-level records do not.
+// ============================================================================
+
+type recordedCall struct {
+	level     Level
+	component string
+	msg       string
+	fields    []Field
+	at        time.Time
+}
+
+type fakeSink struct {
+	calls []recordedCall
+}
+
+func (s *fakeSink) Record(level Level, component, msg string, fields []Field, at time.Time) {
+	s.calls = append(s.calls, recordedCall{level, component, msg, append([]Field(nil), fields...), at})
+}
+
+// TestScenario_AC1_SinkSeesWarnAndErrorFromRootAndWith covers: a sink
+// attached to the root logger also sees records from loggers made with With.
+func TestScenario_AC1_SinkSeesWarnAndErrorFromRootAndWith(t *testing.T) {
+	fsys := fake.NewFS()
+	clock := fake.NewClock(time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC))
+	root := New(fsys, clock, "/agent.log", LevelInfo, "agent")
+
+	sink := &fakeSink{}
+	root.SetSink(sink)
+
+	child := root.With("enforce")
+	child.Warn("policy enforcement failed")
+	root.Error("check-in failed")
+	child.Info("checked in")   // below warn: must not reach the sink
+	root.Debug("request sent") // below warn and below level: must not reach the sink
+
+	if len(sink.calls) != 2 {
+		t.Fatalf("sink saw %d calls, want 2: %+v", len(sink.calls), sink.calls)
+	}
+	if sink.calls[0].level != LevelWarn || sink.calls[0].component != "enforce" || sink.calls[0].msg != "policy enforcement failed" {
+		t.Errorf("first call = %+v, want warn/enforce/policy enforcement failed", sink.calls[0])
+	}
+	if sink.calls[1].level != LevelError || sink.calls[1].component != "agent" || sink.calls[1].msg != "check-in failed" {
+		t.Errorf("second call = %+v, want error/agent/check-in failed", sink.calls[1])
+	}
+}
+
+// TestScenario_AC1_SinkAttachedAfterWithStillSeesChildRecords covers: SetSink
+// reaches a child made from the root before SetSink was called, because the
+// sink holder is shared.
+func TestScenario_AC1_SinkAttachedAfterWithStillSeesChildRecords(t *testing.T) {
+	fsys := fake.NewFS()
+	clock := fake.NewClock(time.Now())
+	root := New(fsys, clock, "/agent.log", LevelInfo, "agent")
+	child := root.With("client") // made before SetSink
+
+	sink := &fakeSink{}
+	root.SetSink(sink)
+
+	child.Warn("request failed")
+
+	if len(sink.calls) != 1 || sink.calls[0].component != "client" {
+		t.Fatalf("sink calls = %+v, want one call from component client", sink.calls)
+	}
+}
+
+// TestScenario_AC1_RecordsBelowLevelNeverReachTheSink covers: a record at a
+// level the logger drops before writing never reaches the sink either.
+func TestScenario_AC1_RecordsBelowLevelNeverReachTheSink(t *testing.T) {
+	fsys := fake.NewFS()
+	clock := fake.NewClock(time.Now())
+	logger := New(fsys, clock, "/agent.log", LevelError, "agent")
+	sink := &fakeSink{}
+	logger.SetSink(sink)
+
+	logger.Warn("agent update failed")
+
+	if len(sink.calls) != 0 {
+		t.Fatalf("sink calls = %+v, want none (warn is below the configured error level)", sink.calls)
+	}
+}
+
+// TestScenario_AC2_SinkSeesARecordEvenWhenTheWriteFails covers: the sink is
+// called whether or not the line could be appended to the file.
+func TestScenario_AC2_SinkSeesARecordEvenWhenTheWriteFails(t *testing.T) {
+	fsys := fake.NewFS()
+	fsys.WriteErr = func(string) error { return errWriteFails }
+	clock := fake.NewClock(time.Now())
+	logger := New(fsys, clock, "/agent.log", LevelInfo, "agent")
+	sink := &fakeSink{}
+	logger.SetSink(sink)
+
+	err := logger.Warn("signed-in user could not be read")
+	if err == nil {
+		t.Fatal("expected the write to fail")
+	}
+	if len(sink.calls) != 1 || sink.calls[0].msg != "signed-in user could not be read" {
+		t.Fatalf("sink calls = %+v, want one call despite the write failure", sink.calls)
+	}
+}
+
+// A nil sink (the default, and after detaching) must not panic.
+func TestScenario_NilSinkDoesNotPanic(t *testing.T) {
+	fsys := fake.NewFS()
+	clock := fake.NewClock(time.Now())
+	logger := New(fsys, clock, "/agent.log", LevelInfo, "agent")
+	logger.Warn("no sink attached")
+	logger.SetSink(&fakeSink{})
+	logger.SetSink(nil)
+	logger.Warn("sink detached")
+}
+
+type writeFailsErr struct{}
+
+func (*writeFailsErr) Error() string { return "disk full" }
+
+var errWriteFails = &writeFailsErr{}
+
 // TestLogger_RotationAtBoundary rotates when file size equals max
 func TestLogger_RotationAtBoundary(t *testing.T) {
 	fsys := fake.NewFS()

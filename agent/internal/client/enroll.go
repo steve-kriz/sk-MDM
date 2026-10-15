@@ -9,8 +9,10 @@ import (
 	"net/http"
 	"net/url"
 	"runtime"
+	"strings"
 	"time"
 
+	"github.com/officehq/sk-mdm/agent/internal/config"
 	"github.com/officehq/sk-mdm/agent/internal/contract"
 	"github.com/officehq/sk-mdm/agent/internal/logging"
 	"github.com/officehq/sk-mdm/agent/internal/version"
@@ -69,19 +71,28 @@ func PlatformName(goos string) string {
 	return "darwin"
 }
 
-// Enroll performs first-run enrollment: it POSTs the device description to
-// /api/v1/enroll with the enrollment token as its only X-MDM header, and
-// persists the device id and device secret the backend returns.
+// Enroll performs first-run enrollment: it POSTs the device description, with
+// the configured ownership, to /api/v1/enroll and persists the device id and
+// device secret the backend returns.
 //
-// Enrollment is the one unsigned call the agent makes — there is no device
-// secret to sign with until it succeeds — so it carries no signature, no
-// timestamp, no nonce and no device id.
+// The credential is the enrollment token — from EnrollmentToken when set,
+// else the config's — sent as X-MDM-Enrollment-Token, the request's only
+// X-MDM header. It is written by a legacy silent install, or minted by the
+// sign-in. With no token, Enroll makes no request and returns
+// ErrAwaitingSignIn.
+//
+// Enrollment is the one call the agent makes without the device signature —
+// there is no device secret to sign with until it succeeds — so it carries no
+// signature, no timestamp, no nonce and no device id.
 //
 // An agent that already holds a device id is refused locally with
 // ErrAlreadyEnrolled: a second enrollment would strand the first identity on
 // the backend. A transport failure or a 5xx is retried with the backoff in
 // enrollBackoff; a 4xx is final, and leaves the state file untouched, because
-// a token the backend rejected will not be accepted a second later.
+// a credential the backend rejected will not be accepted a second later. A
+// 401 or 403 naming one of EnrollmentTokenErrors is ErrEnrollmentTokenRejected,
+// the caller's cue to drop the token and ask for a new sign-in. The token is
+// never logged.
 func (c *Client) Enroll(ctx context.Context) error {
 	st, err := c.store.Load()
 	if err != nil {
@@ -94,6 +105,11 @@ func (c *Client) Enroll(ctx context.Context) error {
 	endpoint, err := c.endpoint(EnrollPath)
 	if err != nil {
 		return err
+	}
+
+	token := c.enrollmentToken()
+	if token == "" {
+		return ErrAwaitingSignIn
 	}
 
 	body, err := json.Marshal(c.enrollRequest())
@@ -116,7 +132,7 @@ func (c *Client) Enroll(ctx context.Context) error {
 			}
 		}
 
-		res, retryable, err := c.enrollAttempt(ctx, endpoint, body)
+		res, retryable, err := c.enrollAttempt(ctx, endpoint, body, token)
 		if err == nil {
 			st.DeviceID = res.DeviceID
 			st.DeviceSecret = res.DeviceSecret
@@ -167,18 +183,28 @@ func (c *Client) enrollRequest() contract.EnrollRequest {
 		OSVersion:    host.OSVersion,
 		HardwareUUID: host.HardwareUUID,
 		AgentVersion: host.AgentVersion,
+		Ownership:    config.NormalizeOwnership(c.cfg.Ownership),
 	}
 }
 
+// enrollmentToken is the token this enrollment is made with: EnrollmentToken's
+// answer when it is set, else the config's, trimmed either way.
+func (c *Client) enrollmentToken() string {
+	if c.EnrollmentToken != nil {
+		return strings.TrimSpace(c.EnrollmentToken())
+	}
+	return strings.TrimSpace(c.cfg.EnrollmentToken)
+}
+
 // enrollAttempt sends one enrollment request. It reports whether a failure is
-// worth retrying: transport errors and 5xx are, a refused token is not.
-func (c *Client) enrollAttempt(ctx context.Context, endpoint *url.URL, body []byte) (contract.EnrollResponse, bool, error) {
+// worth retrying: transport errors and 5xx are, a refused credential is not.
+func (c *Client) enrollAttempt(ctx context.Context, endpoint *url.URL, body []byte, token string) (contract.EnrollResponse, bool, error) {
 	req, err := c.newRequest(ctx, http.MethodPost, endpoint, body)
 	if err != nil {
 		return contract.EnrollResponse{}, false, err
 	}
 	// The enrollment token is the only X-MDM header on this call.
-	req.Header.Set(HeaderEnrollmentToken, c.cfg.EnrollmentToken)
+	req.Header.Set(HeaderEnrollmentToken, token)
 
 	resp, err := c.doer.Do(req)
 	if err != nil {
@@ -205,20 +231,45 @@ func (c *Client) enrollAttempt(ctx context.Context, endpoint *url.URL, body []by
 	case resp.StatusCode >= 500:
 		return contract.EnrollResponse{}, true, fmt.Errorf("enrollment failed with status %d%s", resp.StatusCode, errorSuffix(data))
 
+	case (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) && tokenError(data):
+		return contract.EnrollResponse{}, false, fmt.Errorf("%w: status %d%s", ErrEnrollmentTokenRejected, resp.StatusCode, errorSuffix(data))
+
 	default:
 		return contract.EnrollResponse{}, false, fmt.Errorf("enrollment refused with status %d%s", resp.StatusCode, errorSuffix(data))
 	}
 }
 
+// tokenError reports whether the {"error": "..."} body names one of
+// EnrollmentTokenErrors.
+func tokenError(data []byte) bool {
+	var payload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return false
+	}
+	for _, code := range EnrollmentTokenErrors {
+		if payload.Error == code {
+			return true
+		}
+	}
+	return false
+}
+
 // errorSuffix renders the contract's {"error": "..."} body as " (code)", or
+// " (code: field, field)" when the backend named the offending fields, or
 // nothing at all when the body carries no error key. The code is what support
 // greps for, so it belongs in the message the agent reports.
 func errorSuffix(data []byte) string {
 	var payload struct {
-		Error string `json:"error"`
+		Error  string   `json:"error"`
+		Fields []string `json:"fields"`
 	}
 	if err := json.Unmarshal(data, &payload); err != nil || payload.Error == "" {
 		return ""
+	}
+	if len(payload.Fields) > 0 {
+		return " (" + payload.Error + ": " + strings.Join(payload.Fields, ", ") + ")"
 	}
 	return " (" + payload.Error + ")"
 }

@@ -1,0 +1,92 @@
+{
+  "collectedAt": "2024-10-04T00:00:00Z",
+  "inventory": {
+    "hardware": {
+      "manufacturer": "Apple Inc.",
+      "model": "MacBookPro18,3",
+      "serialNumber": "C02XK1ZZMD6T",
+      "cpu": "Apple M1 Pro",
+      "ramBytes": 17179869184,
+      "diskBytes": 494384795648
+    },
+    "os": {
+      "name": "macOS",
+      "version": "14.6.1",
+      "build": "23G93",
+      "architecture": "arm64"
+    },
+    "software": []
+  },
+  "posture": {
+    "diskEncryption": {
+      "enabled": true,
+      "method": "filevault"
+    },
+    "firewall": {
+      "enabled": true
+    },
+    "antivirus": {
+      "name": "XProtect",
+      "enabled": true,
+      "definitionsAgeDays": 2
+    },
+    "osUpdate": {
+      "lastCheckedAt": "2024-10-03T18:30:00Z",
+      "pendingCount": 0,
+      "rebootRequired": false
+    },
+    "localAdmins": [
+      "admin"
+    ]
+  },
+  "antivirusStatus": {
+    "product": "XProtect",
+    "defenderAvailable": false,
+    "runningMode": null,
+    "protection": {
+      "amServiceEnabled": null,
+      "antispywareEnabled": null,
+      "antivirusEnabled": null,
+      "behaviorMonitorEnabled": null,
+      "ioavProtectionEnabled": null,
+      "onAccessProtectionEnabled": null,
+      "realTimeProtectionEnabled": null,
+      "nisEnabled": null,
+      "tamperProtected": null
+    },
+    "versions": {
+      "engine": null,
+      "product": null,
+      "service": null,
+      "nisEngine": null,
+      "antivirusSignature": null,
+      "antispywareSignature": null,
+      "nisSignature": null,
+      "xprotectDefinitions": "5272",
+      "xprotectRemediator": "145"
+    },
+    "signatures": {
+      "antivirusLastUpdatedAt": "2024-10-02T00:00:00Z",
+      "antivirusAgeDays": 2,
+      "antispywareLastUpdatedAt": null,
+      "antispywareAgeDays": null,
+      "nisLastUpdatedAt": null,
+      "nisAgeDays": null,
+      "outOfDate": null
+    },
+    "scans": {
+      "quickStartedAt": null,
+      "quickEndedAt": null,
+      "quickAgeDays": null,
+      "quickOverdue": null,
+      "fullStartedAt": null,
+      "fullEndedAt": null,
+      "fullAgeDays": null,
+      "fullOverdue": null,
+      "fullRequired": null
+    },
+    "computerState": null,
+    "rebootRequired": null,
+    "securityCenterProducts": []
+  }
+}

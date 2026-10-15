@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/officehq/sk-mdm/agent/internal/platform"
 )
@@ -88,11 +89,33 @@ type Field struct {
 // F builds a Field.
 func F(key string, value any) Field { return Field{Key: key, Value: value} }
 
+// Sink receives every record a logger writes at LevelWarn or above: its
+// level, component, message, fields (in call order, without empty, reserved or
+// repeated keys, exactly as they appear on the line) and the timestamp the
+// line carries. It is called whether or not the line could be appended to the
+// file, and may be called from several goroutines at once.
+type Sink interface {
+	Record(level Level, component, msg string, fields []Field, at time.Time)
+}
+
+// sinkHolder is shared by a logger and every logger made from it by With, so
+// a sink attached to any of them reaches all of them.
+type sinkHolder struct {
+	mu   sync.RWMutex
+	sink Sink
+}
+
+func (h *sinkHolder) get() Sink {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.sink
+}
+
 // Logger writes records to one file.
 //
-// Loggers made by With share the file, the level and the lock with their
-// parent; only the component differs, so two components cannot interleave a
-// half-written line.
+// Loggers made by With share the file, the level, the lock and the sink with
+// their parent; only the component differs, so two components cannot
+// interleave a half-written line.
 type Logger struct {
 	fsys      FileSystem
 	clock     Clock
@@ -101,6 +124,7 @@ type Logger struct {
 	component string
 	maxBytes  int64
 	mu        *sync.Mutex
+	sinks     *sinkHolder
 }
 
 // New returns a logger writing to path at level, tagging records with
@@ -114,7 +138,19 @@ func New(fsys FileSystem, clock Clock, path string, level Level, component strin
 		component: component,
 		maxBytes:  MaxFileBytes,
 		mu:        &sync.Mutex{},
+		sinks:     &sinkHolder{},
 	}
+}
+
+// SetSink attaches sink to this logger and to every logger that shares its
+// file through With, made before or after this call. A nil sink detaches.
+func (l *Logger) SetSink(sink Sink) {
+	if l.sinks == nil {
+		return
+	}
+	l.sinks.mu.Lock()
+	defer l.sinks.mu.Unlock()
+	l.sinks.sink = sink
 }
 
 // With returns a logger for another component, sharing this one's file.
@@ -158,20 +194,45 @@ func (l *Logger) Log(level Level, msg string, fields ...Field) error {
 		return nil
 	}
 
-	line, err := l.encode(level, msg, fields)
+	now := l.clock.Now().UTC()
+	line, err := l.encode(now, level, msg, fields)
 	if err != nil {
 		return err
 	}
-	return l.write(line)
+	writeErr := l.write(line)
+
+	// The sink sees the record even when the file append failed: a device
+	// whose log cannot be written is exactly one an admin needs to hear from.
+	if level >= LevelWarn && l.sinks != nil {
+		if sink := l.sinks.get(); sink != nil {
+			sink.Record(level, l.component, msg, written(fields), now)
+		}
+	}
+	return writeErr
+}
+
+// written is the fields as encode puts them on the line: empty, reserved and
+// repeated keys left out, call order kept.
+func written(fields []Field) []Field {
+	out := make([]Field, 0, len(fields))
+	seen := map[string]bool{}
+	for _, f := range fields {
+		if f.Key == "" || reserved[f.Key] || seen[f.Key] {
+			continue
+		}
+		seen[f.Key] = true
+		out = append(out, f)
+	}
+	return out
 }
 
 // encode renders the record as a single line of JSON, ts first so a log read
 // by eye is chronological at the left margin.
-func (l *Logger) encode(level Level, msg string, fields []Field) ([]byte, error) {
+func (l *Logger) encode(now time.Time, level Level, msg string, fields []Field) ([]byte, error) {
 	var buf bytes.Buffer
 	buf.WriteByte('{')
 
-	if err := appendField(&buf, "ts", l.clock.Now().UTC().Format(timeFormat)); err != nil {
+	if err := appendField(&buf, "ts", now.Format(timeFormat)); err != nil {
 		return nil, err
 	}
 	buf.WriteByte(',')

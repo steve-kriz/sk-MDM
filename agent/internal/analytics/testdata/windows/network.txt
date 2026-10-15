@@ -1,0 +1,2 @@
+{"name":"Ethernet","linkSpeed":1000000000,"freq":10000000,"t1":3536370082513,"t2":3536380082513,"rxBytes1":13509573705,"rxBytes2":13534573705,"txBytes1":4397736564,"txBytes2":4400236564,"rxPackets1":12325836,"rxPackets2":12345836,"txPackets1":8387951,"txPackets2":8392951,"rxErrors":0,"txErrors":405,"rxDiscards":12,"txDiscards":0}
+{"name":"Wi-Fi","linkSpeed":1081000000}

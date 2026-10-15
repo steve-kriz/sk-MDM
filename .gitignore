@@ -5,6 +5,7 @@ node_modules/
 dist/
 backend/dist/
 backend/dist-lambda/
+backend/dist-hasher/
 cdk.out/
 agent/bin/
 

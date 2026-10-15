@@ -2,6 +2,7 @@ package policy
 
 import (
 	"encoding/json"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -842,5 +843,236 @@ func TestScenario_ViolationOrderIncludesAntivirusAfterDiskEncryption(t *testing.
 		if results[0].Violations[i] != v {
 			t.Errorf("violations[%d] = %q, want %q", i, results[0].Violations[i], v)
 		}
+	}
+}
+
+// ============================================================================
+// TASK-060: the six Defender protection keys and WithDefenderHardening
+// (agent/internal/policy/evaluate.go). Scenario names mirror
+// tasks/testing/TASK-060-defender-policy-set-to-on.md's Gherkin.
+// ============================================================================
+
+// defenderHardeningItem is a small constructor so each scenario below reads
+// like the Gherkin table it mirrors.
+func defenderHardeningItem(name, state string) contract.DefenderHardeningItem {
+	return contract.DefenderHardeningItem{Item: name, State: state}
+}
+
+// TestScenario_EvaluateAloneNeverCreatesDefenderViolations covers "policy.Evaluate
+// alone never creates Defender violations".
+func TestScenario_EvaluateAloneNeverCreatesDefenderViolations(t *testing.T) {
+	p := contract.Policy{
+		PolicyID: "p1",
+		Version:  1,
+		Settings: map[string]any{
+			SettingDefenderRealTimeProtection:   true,
+			SettingDefenderCloudProtection:      true,
+			SettingDefenderNetworkProtection:    true,
+			SettingDefenderRansomwareProtection: "block",
+			SettingDefenderReputationProtection: true,
+			SettingDefenderDailySignatureUpdate: true,
+		},
+	}
+	posture := contract.Posture{
+		Firewall:  contract.Firewall{Enabled: false},
+		Antivirus: contract.Antivirus{Enabled: false},
+	}
+	now := time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)
+
+	results := Evaluate(contract.PolicyBundleResponse{Policies: []contract.Policy{p}}, posture, now)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if !results[0].Compliant {
+		t.Errorf("compliant = false, want true")
+	}
+	if len(results[0].Violations) != 0 {
+		t.Errorf("violations = %v, want []", results[0].Violations)
+	}
+}
+
+// TestScenario_FailedRequiredProtectionMakesPolicyNonCompliant covers "A failed
+// required protection makes the policy non-compliant".
+func TestScenario_FailedRequiredProtectionMakesPolicyNonCompliant(t *testing.T) {
+	bundle := contract.PolicyBundleResponse{
+		Policies: []contract.Policy{
+			{
+				PolicyID: "p1",
+				Version:  2,
+				Settings: map[string]any{
+					SettingFirewallEnabled:            true,
+					SettingDefenderRealTimeProtection: true,
+					SettingDefenderNetworkProtection:  true,
+				},
+			},
+		},
+	}
+	input := []Result{
+		{PolicyId: "p1", Version: 2, Compliant: false, Violations: []string{ViolationFirewallDisabled}},
+	}
+	inputCopy := append([]Result(nil), input...)
+
+	hardening := &contract.DefenderHardening{
+		EvaluatedAt: "2026-10-11T10:00:00Z",
+		Items: []contract.DefenderHardeningItem{
+			defenderHardeningItem("realTimeMonitoring", "ok"),
+			defenderHardeningItem("behaviorMonitoring", "failed"),
+			defenderHardeningItem("ioavProtection", "applied"),
+			defenderHardeningItem("scriptScanning", "tamper_blocked"),
+			defenderHardeningItem("networkProtection", "failed"),
+		},
+	}
+
+	out := WithDefenderHardening(input, bundle, hardening)
+
+	if len(out) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(out))
+	}
+	want := []string{
+		ViolationFirewallDisabled,
+		"defender_protection_failed:defenderRealTimeProtection:behaviorMonitoring,scriptScanning",
+		"defender_protection_failed:defenderNetworkProtection:networkProtection",
+	}
+	if len(out[0].Violations) != len(want) {
+		t.Fatalf("violations = %v, want %v", out[0].Violations, want)
+	}
+	for i, v := range want {
+		if out[0].Violations[i] != v {
+			t.Errorf("violations[%d] = %q, want %q", i, out[0].Violations[i], v)
+		}
+	}
+	if out[0].Compliant {
+		t.Error("compliant = true, want false")
+	}
+
+	// The input results slice is unchanged.
+	if !reflect.DeepEqual(input, inputCopy) {
+		t.Errorf("input results were mutated: %v, want %v", input, inputCopy)
+	}
+	if len(input[0].Violations) != 1 {
+		t.Errorf("input[0].Violations = %v, want unchanged length 1", input[0].Violations)
+	}
+}
+
+// TestScenario_WhichItemStatesCauseViolation covers the Scenario Outline of the
+// same name: only failed, tamper_blocked and waiting cause a violation.
+func TestScenario_WhichItemStatesCauseViolation(t *testing.T) {
+	cases := []struct {
+		state      string
+		detail     string
+		compliant  bool
+		violations []string
+	}{
+		{"ok", "", true, []string{}},
+		{"applied", "", true, []string{}},
+		{"not_applicable", "defender_passive", true, []string{}},
+		{"not_applicable", "defender_unavailable", true, []string{}},
+		{"failed", "timeout", false, []string{"defender_protection_failed:defenderDailySignatureUpdate:signatureUpdate"}},
+		{"tamper_blocked", "unchanged after write", false, []string{"defender_protection_failed:defenderDailySignatureUpdate:signatureUpdate"}},
+		{"waiting", "next attempt after 2026-10-11T14:00:00Z", false, []string{"defender_protection_failed:defenderDailySignatureUpdate:signatureUpdate"}},
+	}
+
+	bundle := contract.PolicyBundleResponse{
+		Policies: []contract.Policy{
+			{PolicyID: "p1", Version: 1, Settings: map[string]any{SettingDefenderDailySignatureUpdate: true}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.state, func(t *testing.T) {
+			input := []Result{{PolicyId: "p1", Version: 1, Compliant: true, Violations: []string{}}}
+			hardening := &contract.DefenderHardening{
+				Items: []contract.DefenderHardeningItem{
+					defenderHardeningItem("signatureUpdateInterval", "ok"),
+					defenderHardeningItem("signatureScheduleDay", "ok"),
+					{Item: "signatureUpdate", State: tc.state, Detail: tc.detail},
+				},
+			}
+			out := WithDefenderHardening(input, bundle, hardening)
+			if out[0].Compliant != tc.compliant {
+				t.Errorf("compliant = %v, want %v", out[0].Compliant, tc.compliant)
+			}
+			if !reflect.DeepEqual(out[0].Violations, tc.violations) {
+				t.Errorf("violations = %v, want %v", out[0].Violations, tc.violations)
+			}
+		})
+	}
+}
+
+// TestScenario_NoHardenerResultYetMeansNoDefenderViolation covers "No hardener
+// result yet means no Defender violation".
+func TestScenario_NoHardenerResultYetMeansNoDefenderViolation(t *testing.T) {
+	bundle := contract.PolicyBundleResponse{
+		Policies: []contract.Policy{
+			{
+				PolicyID: "p1",
+				Version:  1,
+				Settings: map[string]any{
+					SettingDefenderRealTimeProtection:   true,
+					SettingDefenderCloudProtection:      true,
+					SettingDefenderNetworkProtection:    true,
+					SettingDefenderRansomwareProtection: "block",
+					SettingDefenderReputationProtection: true,
+					SettingDefenderDailySignatureUpdate: true,
+				},
+			},
+		},
+	}
+	input := []Result{{PolicyId: "p1", Version: 1, Compliant: true, Violations: []string{}}}
+
+	out := WithDefenderHardening(input, bundle, nil)
+	if !out[0].Compliant {
+		t.Error("compliant = false, want true")
+	}
+	if len(out[0].Violations) != 0 {
+		t.Errorf("violations = %v, want []", out[0].Violations)
+	}
+}
+
+// TestScenario_KeysPolicyDoesNotRequireNeverCreateViolations covers "Keys the
+// policy does not require never create violations".
+func TestScenario_KeysPolicyDoesNotRequireNeverCreateViolations(t *testing.T) {
+	bundle := contract.PolicyBundleResponse{
+		Policies: []contract.Policy{
+			{PolicyID: "p1", Version: 1, Settings: map[string]any{SettingDefenderCloudProtection: true}},
+			// defenderNetworkProtection "true" as a string is wrong-typed: not required.
+			{PolicyID: "p2", Version: 1, Settings: map[string]any{SettingDefenderNetworkProtection: "true"}},
+		},
+	}
+	input := []Result{
+		{PolicyId: "p1", Version: 1, Compliant: true, Violations: []string{}},
+		{PolicyId: "p2", Version: 1, Compliant: true, Violations: []string{}},
+	}
+	hardening := &contract.DefenderHardening{
+		Items: []contract.DefenderHardeningItem{
+			defenderHardeningItem("mapsReporting", "ok"),
+			defenderHardeningItem("submitSamplesConsent", "ok"),
+			defenderHardeningItem("networkProtection", "failed"),
+		},
+	}
+
+	out := WithDefenderHardening(input, bundle, hardening)
+	for i, r := range out {
+		if !r.Compliant {
+			t.Errorf("result %d compliant = false, want true", i)
+		}
+		if len(r.Violations) != 0 {
+			t.Errorf("result %d violations = %v, want []", i, r.Violations)
+		}
+	}
+}
+
+// TestScenario_ResultWithNoMatchingBundlePolicyUntouched covers "A result with
+// no matching bundle policy is untouched".
+func TestScenario_ResultWithNoMatchingBundlePolicyUntouched(t *testing.T) {
+	bundle := contract.PolicyBundleResponse{Policies: []contract.Policy{}}
+	input := []Result{{PolicyId: "ghost", Version: 1, Compliant: true, Violations: []string{}}}
+	hardening := &contract.DefenderHardening{
+		Items: []contract.DefenderHardeningItem{defenderHardeningItem("networkProtection", "failed")},
+	}
+
+	out := WithDefenderHardening(input, bundle, hardening)
+	if !reflect.DeepEqual(out[0], input[0]) {
+		t.Errorf("result = %+v, want it unchanged: %+v", out[0], input[0])
 	}
 }

@@ -172,3 +172,46 @@ test('Scenario: Console submit keeps the seven existing keys alongside antivirus
   assert.deepStrictEqual(settings.firewallAllowedDomains, ['allowed.example.com']);
   assert.strictEqual(settings.antivirusEnabled, true);
 });
+
+// ============================================================================
+// TASK-055 AC11: createPolicyState reads antivirusScanFrequency
+// ============================================================================
+
+test('Scenario: AC11 - Console submit sends the selected scan frequency', async (t) => {
+  // Given: the create-policy form has a select named antivirusScanFrequency
+  // set to "weekly" (a select behaves like a text field for fieldValue: no
+  // `.type === 'checkbox'`, just a `.value`)
+  const capture = {};
+  const submitHandler = await bootAppAndGetSubmitHandler(capture);
+
+  const form = makeCreatePolicyForm({
+    name: textField('AV scan policy'),
+    antivirusScanFrequency: textField('weekly'),
+  });
+  const event = { target: form, preventDefault: () => {} };
+
+  // When: the form is submitted
+  submitHandler(event);
+  await flushMicrotasks();
+
+  // Then: the POST body settings carry antivirusScanFrequency "weekly"
+  assert.ok(capture.body, 'expected a POST to /admin/api/v1/policies');
+  assert.strictEqual(capture.body.settings.antivirusScanFrequency, 'weekly');
+});
+
+test('Scenario: AC11 - A blank scan frequency select omits the key', async (t) => {
+  const capture = {};
+  const submitHandler = await bootAppAndGetSubmitHandler(capture);
+
+  const form = makeCreatePolicyForm({
+    name: textField('AV scan policy'),
+    antivirusScanFrequency: textField(''),
+  });
+  const event = { target: form, preventDefault: () => {} };
+
+  submitHandler(event);
+  await flushMicrotasks();
+
+  assert.ok(capture.body, 'expected a POST to /admin/api/v1/policies');
+  assert.strictEqual(capture.body.settings.antivirusScanFrequency, undefined);
+});

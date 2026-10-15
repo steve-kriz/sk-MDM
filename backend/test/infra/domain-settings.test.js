@@ -14,7 +14,11 @@ import assert from 'node:assert';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { DEFAULT_DOMAIN_NAME, resolveDomainSettings } from '../../dist/infra/domain-settings.js';
+import {
+  CERTIFICATE_ARN_SECRET_KEY,
+  DEFAULT_DOMAIN_NAME,
+  resolveDomainSettings,
+} from '../../dist/infra/domain-settings.js';
 
 const CERT = 'arn:aws:acm:us-east-1:123456789012:certificate/abc-123';
 
@@ -119,13 +123,61 @@ test('E2E: Scenario: app.ts wires the resolved domain settings into the stack', 
   assert.match(appTsSource, /import\s*\{\s*resolveDomainSettings\s*\}\s*from\s*'\.\/domain-settings\.js';/);
   assert.match(
     appTsSource,
-    /new MdmStack\(app, 'MdmStack', \{[\s\S]*\.\.\.resolveDomainSettings\(\{\s*env:\s*process\.env,\s*context:\s*\(k\)\s*=>\s*app\.node\.tryGetContext\(k\)\s*\}\)[\s\S]*\}\);/,
-    'MdmStack construction should spread resolveDomainSettings(...) into its props'
+    /new MdmStack\(app, 'MdmStack', \{[\s\S]*\.\.\.resolveDomainSettings\(\{\s*env:\s*process\.env,\s*context:\s*\(k\)\s*=>\s*app\.node\.tryGetContext\(k\),\s*secret\s*\}\)[\s\S]*\}\);/,
+    'MdmStack construction should spread resolveDomainSettings(...) with the loaded deploy secret into its props'
   );
 
   // And the Entra and ENTRA_ADMIN_GROUP_ID lookups are unchanged
   assert.match(appTsSource, /entraTenantId,\s*\n\s*entraClientId,/);
   assert.match(appTsSource, /entraAdminGroupId:\s*setting\('ENTRA_ADMIN_GROUP_ID',\s*'entraAdminGroupId'\)/);
+});
+
+// ============================================================================
+// Certificate ARN from the deploy secret prod/sk-mdm
+// ============================================================================
+
+/** A DeploySecrets-shaped fake over a plain map. */
+function fakeSecret(values) {
+  return { secretId: 'prod/sk-mdm', get: (key) => values[key] };
+}
+
+test('Unit: certificateArn falls back to MDM_CERTIFICATE_ARN in the deploy secret', async (t) => {
+  const settings = resolveDomainSettings({
+    env: {},
+    context: () => undefined,
+    secret: fakeSecret({ MDM_CERTIFICATE_ARN: `  ${CERT}\n` }),
+  });
+  assert.strictEqual(settings.certificateArn, CERT);
+  assert.strictEqual(CERTIFICATE_ARN_SECRET_KEY, 'MDM_CERTIFICATE_ARN');
+});
+
+test('Unit: env and context certificateArn win over the deploy secret', async (t) => {
+  const secret = fakeSecret({ MDM_CERTIFICATE_ARN: 'from-secret' });
+  const fromEnv = resolveDomainSettings({ env: { MDM_CERTIFICATE_ARN: CERT }, context: () => 'from-context', secret });
+  assert.strictEqual(fromEnv.certificateArn, CERT);
+  const fromContext = resolveDomainSettings({
+    env: {},
+    context: (key) => (key === 'certificateArn' ? 'from-context' : undefined),
+    secret,
+  });
+  assert.strictEqual(fromContext.certificateArn, 'from-context');
+});
+
+test('Unit: an absent, empty or whitespace secret certificateArn resolves to undefined', async (t) => {
+  for (const values of [{}, { MDM_CERTIFICATE_ARN: '' }, { MDM_CERTIFICATE_ARN: '  ' }]) {
+    const settings = resolveDomainSettings({ env: {}, context: () => undefined, secret: fakeSecret(values) });
+    assert.strictEqual(settings.certificateArn, undefined);
+  }
+});
+
+test('Unit: the deploy secret supplies only the certificate ARN', async (t) => {
+  const settings = resolveDomainSettings({
+    env: {},
+    context: () => undefined,
+    secret: fakeSecret({ MDM_DOMAIN_NAME: 'other.example.com', MDM_HOSTED_ZONE_ID: 'ZSECRET' }),
+  });
+  assert.strictEqual(settings.domainName, DEFAULT_DOMAIN_NAME);
+  assert.strictEqual(settings.hostedZoneId, undefined);
 });
 
 test('Unit: all three values can be fully resolved from env', async (t) => {

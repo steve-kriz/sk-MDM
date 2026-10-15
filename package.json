@@ -9,6 +9,7 @@
   "scripts": {
     "build": "npm --prefix backend run build",
     "build:agent": "node scripts/build-agent.mjs",
+    "package:installers": "node scripts/package-installers.mjs",
     "publish:installers": "node scripts/publish-installers.mjs",
     "test": "npm --prefix backend run build && node --test \"backend/test/**/*.test.js\" \"installers/test/**/*.test.js\""
   },
@@ -16,6 +17,7 @@
     "node": ">=22"
   },
   "devDependencies": {
+    "@resvg/resvg-js": "2.6.2",
     "yaml": "2.8.1"
   }
 }

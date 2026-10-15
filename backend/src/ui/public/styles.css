@@ -39,6 +39,16 @@ body {
   text-transform: uppercase;
 }
 
+.masthead-links a {
+  color: #fff;
+}
+
+#applications {
+  margin: 0 auto;
+  max-width: 68rem;
+  padding: 1.5rem;
+}
+
 #app {
   margin: 0 auto;
   max-width: 68rem;
@@ -72,6 +82,18 @@ h2 {
 h3 {
   font-size: 1rem;
   margin: 0 0 0.5rem;
+}
+
+details.expandable > summary {
+  cursor: pointer;
+}
+
+details.expandable > summary h3 {
+  display: inline;
+}
+
+details.expandable[open] > summary {
+  margin-bottom: 0.5rem;
 }
 
 .panel,
@@ -175,8 +197,78 @@ tr.device {
   color: var(--bad);
 }
 
+/* The Profile panel's Refresh and Delete device buttons, at the panel's bottom right (TASK-051, TASK-057). */
+.profile-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+/* The delete-device confirmation popup: a dimmed full-viewport backdrop
+   around one centred panel. */
+.modal-backdrop {
+  align-items: center;
+  background: rgba(22, 32, 42, 0.5);
+  display: flex;
+  inset: 0;
+  justify-content: center;
+  padding: 1rem;
+  position: fixed;
+  z-index: 100;
+}
+
+.modal,
+#delete-device-dialog {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  max-width: 34rem;
+  padding: 1rem;
+  width: 100%;
+}
+
+#delete-device-dialog form,
+#application-dialog form {
+  border: 0;
+  margin-bottom: 0;
+  padding: 0;
+}
+
+/* The application add/edit popup can be taller than a short viewport. */
+#application-dialog {
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+}
+
+#application-dialog .hint {
+  color: var(--muted, #5b6774);
+  font-size: 0.85rem;
+  margin: 0.25rem 0 0.5rem;
+}
+
+.modal-actions {
+  display: flex;
+  gap: 0.5rem;
+  justify-content: flex-end;
+}
+
 .copy-field {
   font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+}
+
+.monospace,
+pre.output {
+  font-family: ui-monospace, "Cascadia Mono", Menlo, monospace;
+}
+
+textarea.script-body {
+  min-height: 14rem;
+}
+
+pre.output {
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .landing {
@@ -190,4 +282,136 @@ tr.device {
   border: 1px solid var(--line);
   overflow-x: auto;
   padding: 0.75rem;
+}
+
+/* Read by screen readers, not shown. */
+.visually-hidden {
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  height: 1px;
+  overflow: hidden;
+  position: absolute;
+  white-space: nowrap;
+  width: 1px;
+}
+
+/* A group row's auto-assign select and Save, inline in its table cell. */
+form.auto-assign-group {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  display: flex;
+  gap: 0.5rem;
+  margin: 0;
+  max-width: none;
+  padding: 0;
+}
+
+/* The landing page's explanation of the agent, above the downloads. */
+.landing .lead {
+  font-size: 1.05rem;
+}
+
+.landing .jump-link {
+  font-weight: 600;
+}
+
+.explainer {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  margin: 1.25rem 0;
+  padding: 1rem 1.25rem;
+}
+
+.explainer h3 {
+  margin-top: 0;
+}
+
+.explainer h4 {
+  margin: 1.25rem 0 0.25rem;
+}
+
+.explainer.reassure {
+  border-left: 4px solid var(--accent);
+}
+
+.screenshot {
+  margin: 0.75rem 0 1rem;
+}
+
+.screenshot img {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  display: block;
+  height: auto;
+  max-width: 100%;
+}
+
+.screenshot-narrow img {
+  max-width: min(100%, 26rem);
+}
+
+.screenshot figcaption,
+.explainer .note {
+  color: var(--muted);
+  font-size: 0.875rem;
+  margin-top: 0.35rem;
+}
+
+.table-scroll {
+  overflow-x: auto;
+}
+
+/* Row labels are sentences: read them in normal case, not as column headings. */
+table.grid.comparison th[scope="row"] {
+  color: var(--ink);
+  font-size: inherit;
+  font-weight: normal;
+  text-align: left;
+  text-transform: none;
+}
+
+.comparison td {
+  text-align: center;
+  white-space: nowrap;
+}
+
+.landing .download-heading {
+  border-top: 1px solid var(--line);
+  margin-top: 2rem;
+  padding-top: 1.5rem;
+}
+
+.download-version {
+  color: var(--muted);
+  font-size: 0.875rem;
+  margin-left: 0.5rem;
+}
+
+/* The agent sign-in result pages (/agent/signin, /agent/callback). */
+.signin-page {
+  background: #fff;
+  border: 1px solid var(--line);
+  margin: 3rem auto;
+  max-width: 32rem;
+  padding: 2rem 1.5rem;
+  text-align: center;
+}
+
+.signin-page .signin-logo {
+  height: auto;
+  margin-bottom: 1.5rem;
+  max-width: 210px;
+  width: 60%;
+}
+
+.signin-page h1 {
+  font-size: 1.35rem;
+  margin: 0 0 0.75rem;
+}
+
+.signin-page p {
+  color: var(--muted);
+  margin: 0;
 }

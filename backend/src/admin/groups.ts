@@ -4,6 +4,11 @@
  *   POST /admin/api/v1/groups                   -- create a group
  *   GET  /admin/api/v1/groups                   -- list groups, by name
  *   POST /admin/api/v1/groups/{groupId}/members -- add devices to a group
+ *   DELETE /admin/api/v1/groups/{groupId}/members -- remove devices from a group
+ *   PUT  /admin/api/v1/groups/{groupId}         -- rename a group
+ *   PUT  /admin/api/v1/groups/{groupId}/auto-assign -- {ownership: "officehq" | "byoc" | null}
+ *   DELETE /admin/api/v1/groups/{groupId}       -- delete a group, its memberships
+ *                                                 and its policy assignments
  *
  *   registerGroupRoutes(router, { verifier, table, now, randomBytes });
  *
@@ -25,15 +30,35 @@
  * leave a membership pointing at nothing. `added` counts exactly the devices
  * written.
  *
+ * A group may auto-assign devices by ownership (`autoAssignOwnership`): a
+ * device joins every such group when it enrolls or an admin changes its
+ * ownership (`applyAutoAssignGroups`). Devices already enrolled are not added
+ * when the setting is saved, and nothing is ever removed automatically. This
+ * replaced the one-group-per-ownership `CONFIG` / `ASSIGNMENT` item; a group
+ * with no `autoAssignOwnership` attribute of its own still reads that item, and
+ * the first auto-assign save moves it onto the groups and deletes it.
+ *
  * Every successful write is audited through `appendAudit` (see `src/audit.ts`)
  * with the admin's own identity as the actor.
  */
 import { appendAudit, isoUtc } from '../audit.js';
-import { GSI1_NAME, group, groupIndex, groupListIndex, groupMember, deviceProfile } from '../db/keys.js';
+import { recordDeviceEvent } from '../deviceEvents.js';
+import {
+  GSI1_NAME,
+  group,
+  groupIndex,
+  groupListIndex,
+  groupMember,
+  defaultAssignmentSettings,
+  deviceProfile,
+  policyAssignment,
+} from '../db/keys.js';
+import { readGroupPolicyIds } from '../policies/resolve.js';
 import type { Item, QueryPage } from '../db/table.js';
 import type { RouteResult, Router } from '../http/router.js';
 import {
   adminActor,
+  adminDeleteTable,
   adminNow,
   adminRandomBytes,
   adminWriteTable,
@@ -51,6 +76,20 @@ import {
 /** Sub-path of the group collection: created and listed here. */
 export const GROUP_PATH = '/groups';
 
+/** Sub-path of one group: renamed and deleted here. */
+export const GROUP_DETAIL_PATH = '/groups/{groupId}';
+
+/** Sub-path of a group's auto-assign setting. */
+export const GROUP_AUTO_ASSIGN_PATH = '/groups/{groupId}/auto-assign';
+
+/** The ownerships a group may auto-assign; `byoc` is shown as BYOD. */
+export const AUTO_ASSIGN_OWNERSHIPS = ['officehq', 'byoc'] as const;
+
+export type AutoAssignOwnership = (typeof AUTO_ASSIGN_OWNERSHIPS)[number];
+
+/** The audit action recorded when a group's auto-assign setting changes. */
+export const GROUP_AUTO_ASSIGN_CHANGED_ACTION = 'group.auto_assign.changed';
+
 /** Sub-path of a group's membership collection. */
 export const GROUP_MEMBERS_PATH = '/groups/{groupId}/members';
 
@@ -61,13 +100,22 @@ export const GROUP_ID_PREFIX = 'grp-';
 export const GROUP_ID_BYTES = 8;
 
 /** The only fields a group list item carries. */
-export const GROUP_SUMMARY_FIELDS = ['groupId', 'name', 'createdAt'] as const;
+export const GROUP_SUMMARY_FIELDS = ['groupId', 'name', 'createdAt', 'autoAssignOwnership'] as const;
 
 /** The audit action recorded when a group is created. */
 export const GROUP_CREATED_ACTION = 'group.created';
 
 /** The audit action recorded when devices are added to a group. */
 export const GROUP_MEMBERS_ADDED_ACTION = 'group.members_added';
+
+/** The audit action recorded when a group is renamed. */
+export const GROUP_RENAMED_ACTION = 'group.renamed';
+
+/** The audit action recorded when a group is deleted. */
+export const GROUP_DELETED_ACTION = 'group.deleted';
+
+/** The audit action recorded when devices are removed from a group. */
+export const GROUP_MEMBERS_REMOVED_ACTION = 'group.members_removed';
 
 /** The string value of an attribute, or `null` when it is not a non-empty string. */
 function stringOrNull(value: unknown): string | null {
@@ -86,13 +134,110 @@ function memberDeviceId(member: Item): string | null {
   return stringOrNull(member.deviceId) ?? (sk.startsWith('MEMBER#') ? sk.slice('MEMBER#'.length) : null);
 }
 
-/** The three fields a listed group carries, and nothing else. */
-export function groupSummary(record: Item): Item {
+function isAutoAssignOwnership(value: unknown): value is AutoAssignOwnership {
+  return typeof value === 'string' && (AUTO_ASSIGN_OWNERSHIPS as readonly string[]).includes(value);
+}
+
+/** The legacy `CONFIG` / `ASSIGNMENT` item as group id -> ownership; empty when absent. */
+export async function readLegacyAutoAssign(table: Pick<AdminTable, 'get'>): Promise<Map<string, AutoAssignOwnership>> {
+  const legacy = new Map<string, AutoAssignOwnership>();
+  const item = await table.get(defaultAssignmentSettings());
+  for (const ownership of AUTO_ASSIGN_OWNERSHIPS) {
+    const groupId = stringOrNull(item?.[ownership]);
+    // One group holds one ownership; the first listed wins a collision.
+    if (groupId !== null && !legacy.has(groupId)) {
+      legacy.set(groupId, ownership);
+    }
+  }
+  return legacy;
+}
+
+/**
+ * The ownership a group auto-assigns: its own `autoAssignOwnership` attribute
+ * when it has one (`null` meaning none), else what the legacy item says.
+ */
+export function effectiveAutoAssign(
+  record: Item,
+  legacy: ReadonlyMap<string, AutoAssignOwnership>,
+): AutoAssignOwnership | null {
+  if (Object.prototype.hasOwnProperty.call(record, 'autoAssignOwnership')) {
+    return isAutoAssignOwnership(record.autoAssignOwnership) ? record.autoAssignOwnership : null;
+  }
+  const groupId = groupIdOf(record);
+  return groupId === null ? null : (legacy.get(groupId) ?? null);
+}
+
+/** The fields a listed group carries, and nothing else. */
+export function groupSummary(record: Item, legacy: ReadonlyMap<string, AutoAssignOwnership> = new Map()): Item {
   return {
     groupId: groupIdOf(record),
     name: stringOrNull(record.name),
     createdAt: stringOrNull(record.createdAt),
+    autoAssignOwnership: effectiveAutoAssign(record, legacy),
   };
+}
+
+/** Every group record, following the `gsi1` list cursor to the end. */
+async function readAllGroupRecords(table: Pick<AdminTable, 'query'>): Promise<Item[]> {
+  const { gsi1pk } = groupListIndex('');
+  const records: Item[] = [];
+  let cursor: string | null = null;
+  do {
+    const page: QueryPage = await table.query({
+      IndexName: GSI1_NAME,
+      KeyConditionExpression: '#gsi1pk = :gsi1pk',
+      ExpressionAttributeNames: { '#gsi1pk': 'gsi1pk' },
+      ExpressionAttributeValues: { ':gsi1pk': gsi1pk },
+      cursor,
+    });
+    records.push(...page.items);
+    const next = page.cursor ?? null;
+    // A cursor that does not move would page forever; treat it as the end.
+    cursor = next === cursor ? null : next;
+  } while (cursor !== null);
+  return records;
+}
+
+/** What applying auto-assign needs: reading groups and writing memberships. */
+export interface AutoAssignTable extends Pick<AdminTable, 'get' | 'query'> {
+  put(item: Item): Promise<void>;
+}
+
+/**
+ * Add a device to every group that auto-assigns `ownership`, writing each
+ * membership with exactly the shape `handleGroupMembersAdd` writes (so adding
+ * twice leaves one item). Returns the group ids joined, in list order; `[]`
+ * for any other ownership. Never removes a membership. Throws when the table
+ * does; the callers decide that a throw never fails their request.
+ */
+export async function applyAutoAssignGroups(
+  table: AutoAssignTable,
+  deviceId: string,
+  ownership: string,
+  at: Date,
+): Promise<string[]> {
+  if (!isAutoAssignOwnership(ownership)) {
+    return [];
+  }
+  const legacy = await readLegacyAutoAssign(table);
+  const joined: string[] = [];
+  for (const record of await readAllGroupRecords(table)) {
+    const groupId = groupIdOf(record);
+    if (groupId === null || effectiveAutoAssign(record, legacy) !== ownership) {
+      continue;
+    }
+    let memberKey;
+    let indexKey;
+    try {
+      memberKey = groupMember(groupId, deviceId);
+      indexKey = groupIndex(groupId, deviceId);
+    } catch {
+      continue;
+    }
+    await table.put({ ...memberKey, ...indexKey, groupId, deviceId, addedAt: isoUtc(at) });
+    joined.push(groupId);
+  }
+  return joined;
 }
 
 /**
@@ -196,7 +341,11 @@ export const handleGroupList: AdminRouteHandler = async (req, deps): Promise<Rou
     cursor,
   });
 
-  return { statusCode: 200, body: { items: page.items.map(groupSummary), cursor: page.cursor } };
+  const legacy = await readLegacyAutoAssign(deps.table);
+  return {
+    statusCode: 200,
+    body: { items: page.items.map((record) => groupSummary(record, legacy)), cursor: page.cursor },
+  };
 };
 
 /**
@@ -257,12 +406,299 @@ export const handleGroupMembersAdd: AdminRouteHandler = async (req, deps): Promi
     now: at,
   });
 
+  // A group with no record is still accepted (existing behaviour): its events
+  // then name the group by its id.
+  if (added.length > 0) {
+    let record: Item | null = null;
+    try {
+      record = await readGroupRecord(table, groupId);
+    } catch {
+      record = null;
+    }
+    const name = groupEventName(record, groupId);
+    for (const deviceId of added) {
+      await recordDeviceEvent(table, {
+        deviceId,
+        source: 'admin',
+        type: 'group.added',
+        summary: `Added to group ${name}`,
+        details: { groupId },
+        actor: adminActor(req.claims),
+        occurredAt: at,
+      });
+    }
+  }
+
   return { statusCode: 200, body: { added: added.length } };
+};
+
+/**
+ * The group record for a path id, or `null` when the id cannot form a key or
+ * names no group.
+ */
+async function readGroupRecord(table: AdminTable, groupId: string): Promise<Item | null> {
+  let key;
+  try {
+    key = group(groupId);
+  } catch {
+    return null;
+  }
+  const record = await table.get(key);
+  return record === undefined || record === null ? null : record;
+}
+
+/** The name a group is shown by in a History event: its string `name`, else its id. */
+function groupEventName(record: Item | null, groupId: string): string {
+  return record !== null && typeof record.name === 'string' ? record.name : groupId;
+}
+
+/**
+ * `PUT /admin/api/v1/groups/{groupId}` -- rename a group.
+ *
+ * The record is written back whole, so `createdAt` and every other attribute
+ * survive; only `name` and the list-index sort key move. Duplicate names are
+ * allowed, exactly as on create.
+ */
+export const handleGroupRename: AdminRouteHandler = async (req, deps): Promise<RouteResult> => {
+  const body = readJsonBody(req.body) ?? {};
+  const name = stringOrNull(body.name);
+  if (name === null) {
+    return jsonError(400, 'invalid_request', { fields: ['name'] });
+  }
+
+  const groupId = req.params?.groupId ?? '';
+  const record = await readGroupRecord(deps.table, groupId);
+  if (record === null) {
+    return jsonError(404, 'not_found');
+  }
+
+  const table = adminWriteTable(deps.table);
+  const at = adminNow(deps);
+  const from = stringOrNull(record.name);
+
+  await table.put({
+    ...record,
+    ...groupListIndex(name),
+    name,
+  });
+
+  await appendAudit(table, {
+    action: GROUP_RENAMED_ACTION,
+    actor: adminActor(req.claims),
+    target: groupId,
+    detail: { from, to: name },
+    now: at,
+  });
+
+  return { statusCode: 200, body: { groupId, name } };
+};
+
+/**
+ * `PUT /admin/api/v1/groups/{groupId}/auto-assign` -- set which ownership the
+ * group auto-assigns, or `null` for none. The body must be exactly
+ * `{ownership}`. Saving adds no existing device. The first save also moves the
+ * legacy `CONFIG` / `ASSIGNMENT` item onto the groups it names (a group that
+ * already has its own value keeps it) and deletes it.
+ */
+export const handleGroupAutoAssign: AdminRouteHandler = async (req, deps): Promise<RouteResult> => {
+  const body = readJsonBody(req.body);
+  const posted: Record<string, unknown> = body !== null && typeof body === 'object' && !Array.isArray(body) ? body : {};
+  const invalid = Object.keys(posted).filter((key) => key !== 'ownership');
+  const ownership = posted.ownership;
+  if (
+    !Object.prototype.hasOwnProperty.call(posted, 'ownership') ||
+    (ownership !== null && !isAutoAssignOwnership(ownership))
+  ) {
+    invalid.unshift('ownership');
+  }
+  if (invalid.length > 0) {
+    return jsonError(400, 'invalid_request', { fields: invalid });
+  }
+
+  const groupId = req.params?.groupId ?? '';
+  const record = await readGroupRecord(deps.table, groupId);
+  if (record === null) {
+    return jsonError(404, 'not_found');
+  }
+
+  const table = adminDeleteTable(deps.table);
+  const at = adminNow(deps);
+  const legacy = await readLegacyAutoAssign(table);
+  const from = effectiveAutoAssign(record, legacy);
+
+  if (legacy.size > 0) {
+    for (const [legacyGroupId, legacyOwnership] of legacy) {
+      if (legacyGroupId === groupId) {
+        continue;
+      }
+      const legacyRecord = await readGroupRecord(table, legacyGroupId);
+      if (legacyRecord !== null && !Object.prototype.hasOwnProperty.call(legacyRecord, 'autoAssignOwnership')) {
+        await table.put({ ...legacyRecord, autoAssignOwnership: legacyOwnership });
+      }
+    }
+    await table.delete(defaultAssignmentSettings());
+  }
+
+  const to = ownership as AutoAssignOwnership | null;
+  await table.put({ ...record, autoAssignOwnership: to });
+
+  await appendAudit(table, {
+    action: GROUP_AUTO_ASSIGN_CHANGED_ACTION,
+    actor: adminActor(req.claims),
+    target: groupId,
+    detail: { from, to },
+    now: at,
+  });
+
+  return { statusCode: 200, body: { groupId, autoAssignOwnership: to } };
+};
+
+/**
+ * `DELETE /admin/api/v1/groups/{groupId}` -- delete a group.
+ *
+ * The delete cascades: every membership and every policy assignment that
+ * targets the group goes with it, so no policy keeps reaching devices through
+ * a group that no longer exists. Policies and devices themselves are kept.
+ * Like a destructive command, it needs `{confirm: true}` in the body.
+ */
+export const handleGroupDelete: AdminRouteHandler = async (req, deps): Promise<RouteResult> => {
+  const body = readJsonBody(req.body) ?? {};
+  const groupId = req.params?.groupId ?? '';
+  const record = await readGroupRecord(deps.table, groupId);
+  if (record === null) {
+    return jsonError(404, 'not_found');
+  }
+  if (body.confirm !== true) {
+    return jsonError(409, 'confirmation_required');
+  }
+
+  const table = adminDeleteTable(deps.table);
+  const at = adminNow(deps);
+
+  let assignmentsRemoved = 0;
+  for (const policyId of await readGroupPolicyIds(table, groupId)) {
+    let key;
+    try {
+      key = policyAssignment(policyId, groupId);
+    } catch {
+      continue;
+    }
+    await table.delete(key);
+    assignmentsRemoved += 1;
+  }
+
+  let membersRemoved = 0;
+  const removedDeviceIds: string[] = [];
+  for (const deviceId of await readGroupMemberIds(table, groupId)) {
+    let key;
+    try {
+      key = groupMember(groupId, deviceId);
+    } catch {
+      continue;
+    }
+    await table.delete(key);
+    membersRemoved += 1;
+    removedDeviceIds.push(deviceId);
+  }
+
+  await table.delete(group(groupId));
+
+  const actor = adminActor(req.claims);
+  await appendAudit(table, {
+    action: GROUP_DELETED_ACTION,
+    actor,
+    target: groupId,
+    detail: { name: stringOrNull(record.name), membersRemoved, assignmentsRemoved },
+    now: at,
+  });
+
+  const name = groupEventName(record, groupId);
+  for (const deviceId of removedDeviceIds) {
+    await recordDeviceEvent(table, {
+      deviceId,
+      source: 'admin',
+      type: 'group.removed',
+      summary: `Removed from group ${name} (group deleted)`,
+      details: { groupId, reason: 'group_deleted' },
+      actor,
+      occurredAt: at,
+    });
+  }
+
+  return { statusCode: 200, body: { groupId, membersRemoved, assignmentsRemoved } };
+};
+
+/**
+ * `DELETE /admin/api/v1/groups/{groupId}/members` -- remove devices from a group.
+ *
+ * The mirror of adding: a bulk operation, so an id that is not a member, or
+ * that cannot form a key, is skipped, and `removed` counts exactly the
+ * memberships that existed and were deleted.
+ */
+export const handleGroupMembersRemove: AdminRouteHandler = async (req, deps): Promise<RouteResult> => {
+  const body = readJsonBody(req.body) ?? {};
+  const deviceIds = body.deviceIds;
+  if (!Array.isArray(deviceIds) || deviceIds.some((deviceId) => typeof deviceId !== 'string')) {
+    return jsonError(400, 'invalid_request');
+  }
+
+  const groupId = req.params?.groupId ?? '';
+  const record = await readGroupRecord(deps.table, groupId);
+  if (record === null) {
+    return jsonError(404, 'not_found');
+  }
+
+  const table = adminDeleteTable(deps.table);
+  const at = adminNow(deps);
+
+  const removed: string[] = [];
+  for (const deviceId of new Set(deviceIds as string[])) {
+    let key;
+    try {
+      key = groupMember(groupId, deviceId);
+    } catch {
+      continue;
+    }
+    const member = await table.get(key);
+    if (member === undefined || member === null) {
+      continue;
+    }
+    await table.delete(key);
+    removed.push(deviceId);
+  }
+
+  const actor = adminActor(req.claims);
+  await appendAudit(table, {
+    action: GROUP_MEMBERS_REMOVED_ACTION,
+    actor,
+    target: groupId,
+    detail: { deviceIds: removed, removed: removed.length },
+    now: at,
+  });
+
+  const name = groupEventName(record, groupId);
+  for (const deviceId of removed) {
+    await recordDeviceEvent(table, {
+      deviceId,
+      source: 'admin',
+      type: 'group.removed',
+      summary: `Removed from group ${name}`,
+      details: { groupId },
+      actor,
+      occurredAt: at,
+    });
+  }
+
+  return { statusCode: 200, body: { removed: removed.length } };
 };
 
 /** Register the group routes on a router. Returns the router, so calls chain. */
 export function registerGroupRoutes(router: Router, source: AdminDependencySource): Router {
   registerAdminRoute(router, 'POST', GROUP_PATH, handleGroupCreate, source);
   registerAdminRoute(router, 'GET', GROUP_PATH, handleGroupList, source);
+  registerAdminRoute(router, 'PUT', GROUP_DETAIL_PATH, handleGroupRename, source);
+  registerAdminRoute(router, 'PUT', GROUP_AUTO_ASSIGN_PATH, handleGroupAutoAssign, source);
+  registerAdminRoute(router, 'DELETE', GROUP_DETAIL_PATH, handleGroupDelete, source);
+  registerAdminRoute(router, 'DELETE', GROUP_MEMBERS_PATH, handleGroupMembersRemove, source);
   return registerAdminRoute(router, 'POST', GROUP_MEMBERS_PATH, handleGroupMembersAdd, source);
 }

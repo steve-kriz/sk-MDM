@@ -75,6 +75,22 @@ func Uninstall(ctx context.Context, cfg Config) error {
 	return uninstallDarwin(ctx, cfg)
 }
 
+// EnsureRecovery (re)applies the service's recovery actions, so the service
+// manager restarts the agent when it exits to apply an update or crashes. On
+// Windows it sets the SCM failure actions and failure flag, idempotently; it is
+// run at every managed start so a service registered by an older installer
+// picks them up. On macOS it does nothing: the LaunchDaemon's KeepAlive already
+// restarts the job on any exit.
+func EnsureRecovery(ctx context.Context, cfg Config) error {
+	if cfg.goos() != "windows" {
+		return nil
+	}
+	if cfg.Runner == nil {
+		return errors.New("service: no command runner")
+	}
+	return ensureRecoveryWindows(ctx, cfg)
+}
+
 // goos is the platform the registration is for.
 func (c Config) goos() string {
 	if c.GOOS != "" {

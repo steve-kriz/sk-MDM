@@ -57,6 +57,48 @@ class FakeTable {
     return { items: [], cursor: null };
   }
 
+  async update(key, fields) {
+    const keyStr = this.keyStr(key);
+    let item = this.items.get(keyStr);
+    if (!item) {
+      item = { ...key };
+    }
+
+    // Apply update expression
+    if (fields?.UpdateExpression) {
+      const updates = this.parseUpdateExpression(
+        fields.UpdateExpression,
+        fields.ExpressionAttributeNames || {},
+        fields.ExpressionAttributeValues || {}
+      );
+      item = { ...item, ...updates };
+    }
+
+    this.items.set(keyStr, item);
+    return item;
+  }
+
+  parseUpdateExpression(expr, names, values) {
+    const updates = {};
+    const setPart = expr.match(/SET\s+(.*?)(?:$|REMOVE|ADD|DELETE)/i)?.[1] || '';
+
+    if (setPart) {
+      const assignments = setPart.split(',');
+      for (const assignment of assignments) {
+        const [lhs, rhs] = assignment.trim().split('=').map(s => s.trim());
+        if (lhs && rhs) {
+          const fieldName = names[lhs] || lhs;
+          const fieldValue = values[rhs];
+          if (fieldValue !== undefined) {
+            updates[fieldName] = fieldValue;
+          }
+        }
+      }
+    }
+
+    return updates;
+  }
+
   seedItem(item) {
     this.items.set(this.keyStr({ pk: item.pk, sk: item.sk }), { ...item });
   }

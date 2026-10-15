@@ -3,6 +3,10 @@
     <title>OfficeHQ MDM Agent</title>
     <organization>au.com.officehq</organization>
     <options customize="never" hostArchitectures="x86_64,arm64" rootVolumeOnly="true"/>
+    <!-- Branding: background.png and welcome.html (with logo.png) are staged
+         into the productbuild resources directory by build.sh. -->
+    <background file="background.png" mime-type="image/png" alignment="left" scaling="proportional"/>
+    <welcome file="welcome.html" mime-type="text/html"/>
     <volume-check>
         <allowed-os-versions>
             <os-version min="12.0"/>

@@ -200,9 +200,9 @@ func TestScenario_UnknownInterpreterIsInvalidPayload(t *testing.T) {
 	}
 
 	cmd := Command{
-		CommandID: "bash-cmd",
+		CommandID: "fish-cmd",
 		Type:      TypeRunScript,
-		Payload:   json.RawMessage(`{"interpreter":"bash","script":"echo test"}`),
+		Payload:   json.RawMessage(`{"interpreter":"fish","script":"echo test"}`),
 	}
 
 	result := Execute(context.Background(), cmd, deps)
@@ -348,6 +348,234 @@ func TestScenario_ZshScriptIsInvoked(t *testing.T) {
 	}
 	if len(call.Args) != 1 {
 		t.Errorf("expected 1 arg (script path), got %d", len(call.Args))
+	}
+}
+
+// TestScenario_CmdScriptIsInvokedOnWindows tests cmd invocation (SH1).
+func TestScenario_CmdScriptIsInvokedOnWindows(t *testing.T) {
+	runner := fake.NewCommandRunner()
+	runner.Results["cmd.exe /d /c"] = platform.CommandResult{ExitCode: 0}
+
+	fs := fake.NewFS()
+	deps := &Deps{
+		Runner: runner,
+		FS:     fs,
+		Clock:  fake.NewClock(time.Now()),
+		GOOS:   "windows",
+	}
+
+	cmd := Command{
+		CommandID: "cmd-test",
+		Type:      TypeRunScript,
+		Payload:   json.RawMessage(`{"interpreter":"cmd","script":"echo test"}`),
+	}
+
+	result := Execute(context.Background(), cmd, deps)
+
+	calls := runner.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+
+	call := calls[0]
+	if call.Name != "cmd.exe" {
+		t.Errorf("expected name 'cmd.exe', got '%s'", call.Name)
+	}
+
+	expectedArgs := []string{"/d", "/c"}
+	for i, arg := range expectedArgs {
+		if i >= len(call.Args) {
+			t.Fatalf("expected at least %d args, got %d", len(expectedArgs)+1, len(call.Args))
+		}
+		if call.Args[i] != arg {
+			t.Errorf("arg[%d]: expected '%s', got '%s'", i, arg, call.Args[i])
+		}
+	}
+
+	if len(call.Args) < 3 {
+		t.Fatalf("expected at least 3 args (including file), got %d", len(call.Args))
+	}
+
+	if result.Status != StatusSucceeded {
+		t.Errorf("expected status 'succeeded', got '%s'", result.Status)
+	}
+
+	// Verify temp file was cleaned up
+	if len(fs.Paths()) != 0 {
+		t.Errorf("expected all temp files to be deleted, but found: %v", fs.Paths())
+	}
+}
+
+// TestScenario_BashScriptIsInvokedOnMacOS tests bash invocation (SH2).
+func TestScenario_BashScriptIsInvokedOnMacOS(t *testing.T) {
+	runner := fake.NewCommandRunner()
+	runner.Results["/bin/bash"] = platform.CommandResult{ExitCode: 0}
+
+	fs := fake.NewFS()
+	deps := &Deps{
+		Runner: runner,
+		FS:     fs,
+		Clock:  fake.NewClock(time.Now()),
+		GOOS:   "darwin",
+	}
+
+	cmd := Command{
+		CommandID: "bash-test",
+		Type:      TypeRunScript,
+		Payload:   json.RawMessage(`{"interpreter":"bash","script":"echo test"}`),
+	}
+
+	result := Execute(context.Background(), cmd, deps)
+
+	calls := runner.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(calls))
+	}
+
+	call := calls[0]
+	if call.Name != "/bin/bash" {
+		t.Errorf("expected name '/bin/bash', got '%s'", call.Name)
+	}
+	if len(call.Args) != 1 {
+		t.Errorf("expected 1 arg (script path), got %d", len(call.Args))
+	}
+
+	if result.Status != StatusSucceeded {
+		t.Errorf("expected status 'succeeded', got '%s'", result.Status)
+	}
+
+	// Verify temp file was cleaned up
+	if len(fs.Paths()) != 0 {
+		t.Errorf("expected all temp files to be deleted, but found: %v", fs.Paths())
+	}
+}
+
+// TestScenario_CmdOnDarwinIsUnsupported tests cmd rejection on macOS (SH4).
+func TestScenario_CmdOnDarwinIsUnsupported(t *testing.T) {
+	deps := &Deps{
+		Runner: fake.NewCommandRunner(),
+		FS:     fake.NewFS(),
+		Clock:  fake.NewClock(time.Now()),
+		GOOS:   "darwin",
+	}
+
+	cmd := Command{
+		CommandID: "cmd-darwin-test",
+		Type:      TypeRunScript,
+		Payload:   json.RawMessage(`{"interpreter":"cmd","script":"echo test"}`),
+	}
+
+	result := Execute(context.Background(), cmd, deps)
+
+	if result.Status != StatusFailed {
+		t.Errorf("expected status 'failed', got '%s'", result.Status)
+	}
+	if result.ExitCode != FailureExitCode {
+		t.Errorf("expected exitCode -1, got %d", result.ExitCode)
+	}
+	if result.Output != "error: unsupported_interpreter" {
+		t.Errorf("expected output 'error: unsupported_interpreter', got '%s'", result.Output)
+	}
+
+	// Verify runner was never invoked
+	if len(deps.Runner.(*fake.CommandRunner).Calls()) != 0 {
+		t.Errorf("expected runner not to be invoked")
+	}
+}
+
+// TestScenario_PowerShellOnDarwinIsUnsupported tests powershell rejection on macOS (SH4).
+func TestScenario_PowerShellOnDarwinIsUnsupported(t *testing.T) {
+	deps := &Deps{
+		Runner: fake.NewCommandRunner(),
+		FS:     fake.NewFS(),
+		Clock:  fake.NewClock(time.Now()),
+		GOOS:   "darwin",
+	}
+
+	cmd := Command{
+		CommandID: "ps-darwin-test",
+		Type:      TypeRunScript,
+		Payload:   json.RawMessage(`{"interpreter":"powershell","script":"echo test"}`),
+	}
+
+	result := Execute(context.Background(), cmd, deps)
+
+	if result.Status != StatusFailed {
+		t.Errorf("expected status 'failed', got '%s'", result.Status)
+	}
+	if result.ExitCode != FailureExitCode {
+		t.Errorf("expected exitCode -1, got %d", result.ExitCode)
+	}
+	if result.Output != "error: unsupported_interpreter" {
+		t.Errorf("expected output 'error: unsupported_interpreter', got '%s'", result.Output)
+	}
+
+	if len(deps.Runner.(*fake.CommandRunner).Calls()) != 0 {
+		t.Errorf("expected runner not to be invoked")
+	}
+}
+
+// TestScenario_BashOnWindowsIsUnsupported tests bash rejection on Windows (SH4).
+func TestScenario_BashOnWindowsIsUnsupported(t *testing.T) {
+	deps := &Deps{
+		Runner: fake.NewCommandRunner(),
+		FS:     fake.NewFS(),
+		Clock:  fake.NewClock(time.Now()),
+		GOOS:   "windows",
+	}
+
+	cmd := Command{
+		CommandID: "bash-windows-test",
+		Type:      TypeRunScript,
+		Payload:   json.RawMessage(`{"interpreter":"bash","script":"echo test"}`),
+	}
+
+	result := Execute(context.Background(), cmd, deps)
+
+	if result.Status != StatusFailed {
+		t.Errorf("expected status 'failed', got '%s'", result.Status)
+	}
+	if result.ExitCode != FailureExitCode {
+		t.Errorf("expected exitCode -1, got %d", result.ExitCode)
+	}
+	if result.Output != "error: unsupported_interpreter" {
+		t.Errorf("expected output 'error: unsupported_interpreter', got '%s'", result.Output)
+	}
+
+	if len(deps.Runner.(*fake.CommandRunner).Calls()) != 0 {
+		t.Errorf("expected runner not to be invoked")
+	}
+}
+
+// TestScenario_ZshOnWindowsIsUnsupported tests zsh rejection on Windows (SH4).
+func TestScenario_ZshOnWindowsIsUnsupported(t *testing.T) {
+	deps := &Deps{
+		Runner: fake.NewCommandRunner(),
+		FS:     fake.NewFS(),
+		Clock:  fake.NewClock(time.Now()),
+		GOOS:   "windows",
+	}
+
+	cmd := Command{
+		CommandID: "zsh-windows-test",
+		Type:      TypeRunScript,
+		Payload:   json.RawMessage(`{"interpreter":"zsh","script":"echo test"}`),
+	}
+
+	result := Execute(context.Background(), cmd, deps)
+
+	if result.Status != StatusFailed {
+		t.Errorf("expected status 'failed', got '%s'", result.Status)
+	}
+	if result.ExitCode != FailureExitCode {
+		t.Errorf("expected exitCode -1, got %d", result.ExitCode)
+	}
+	if result.Output != "error: unsupported_interpreter" {
+		t.Errorf("expected output 'error: unsupported_interpreter', got '%s'", result.Output)
+	}
+
+	if len(deps.Runner.(*fake.CommandRunner).Calls()) != 0 {
+		t.Errorf("expected runner not to be invoked")
 	}
 }
 

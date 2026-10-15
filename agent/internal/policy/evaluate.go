@@ -9,6 +9,13 @@
 // no antivirus is active -- so the cycle that enforces still reports the
 // posture it found, and the next cycle shows the result.
 //
+// The one exception is the Defender protection hardener in
+// agent/internal/antivirus. Evaluate treats the six defender* keys as met;
+// after Enforce, WithDefenderHardening adds a violation for each required key
+// whose protection the hardener could not turn on in that same cycle, so the
+// violations and the defenderHardening block on a check-in come from the same
+// Apply.
+//
 // Each entry of the bundle is judged on its own settings rather than on the
 // bundle's effectiveSettings, because a result is reported per policyId and
 // version: a policy that lost a contested setting still has to say whether the
@@ -27,6 +34,7 @@ import (
 	"encoding/json"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/officehq/sk-mdm/agent/internal/contract"
@@ -47,6 +55,17 @@ const (
 	// SettingLocalAdminAllowlist names the accounts allowed to be local
 	// administrators; any other local administrator is a violation.
 	SettingLocalAdminAllowlist = "localAdminAllowlist"
+
+	// The six Defender protection keys. Evaluate treats them as met; their
+	// violations come from WithDefenderHardening. The five boolean keys are
+	// required when true, SettingDefenderRansomwareProtection when it is
+	// "audit" or "block".
+	SettingDefenderRealTimeProtection   = "defenderRealTimeProtection"
+	SettingDefenderCloudProtection      = "defenderCloudProtection"
+	SettingDefenderNetworkProtection    = "defenderNetworkProtection"
+	SettingDefenderRansomwareProtection = "defenderRansomwareProtection"
+	SettingDefenderReputationProtection = "defenderReputationProtection"
+	SettingDefenderDailySignatureUpdate = "defenderDailySignatureUpdate"
 )
 
 // The violation codes reported on the wire. ViolationLocalAdminPrefix is a
@@ -58,7 +77,102 @@ const (
 	ViolationAntivirusDisabled     = "antivirus_disabled"
 	ViolationOSUpdateOverdue       = "os_update_overdue"
 	ViolationLocalAdminPrefix      = "unauthorized_local_admin:"
+	// ViolationDefenderPrefix is followed by "<policyKey>:<item>[,<item>...]",
+	// one entry per required Defender key with at least one failing item.
+	ViolationDefenderPrefix = "defender_protection_failed:"
 )
+
+// defenderKeyItems maps each Defender protection key, in violation order, to
+// the hardener items it drives, in the fixed item order.
+var defenderKeyItems = []struct {
+	key   string
+	items []string
+}{
+	{SettingDefenderRealTimeProtection, []string{"realTimeMonitoring", "behaviorMonitoring", "ioavProtection", "scriptScanning"}},
+	{SettingDefenderCloudProtection, []string{"mapsReporting", "submitSamplesConsent"}},
+	{SettingDefenderNetworkProtection, []string{"networkProtection"}},
+	{SettingDefenderRansomwareProtection, []string{"controlledFolderAccess"}},
+	{SettingDefenderReputationProtection, []string{"puaProtection", "smartScreenWindows", "smartScreenEdge"}},
+	{SettingDefenderDailySignatureUpdate, []string{"signatureUpdateInterval", "signatureScheduleDay", "signatureUpdate"}},
+}
+
+// defenderFailingStates are the hardener item states that count as a failed
+// protection. waiting counts: it only follows a failed signature update.
+var defenderFailingStates = map[string]bool{
+	"failed":         true,
+	"tamper_blocked": true,
+	"waiting":        true,
+}
+
+// WithDefenderHardening returns a new slice of results with the Defender
+// protection violations of hardening added. Each result is matched to the
+// bundle policy with the same policyId and version; for each Defender key that
+// policy itself requires, one violation lists the key's items whose state is
+// failed, tamper_blocked or waiting. Defender violations follow the existing
+// ones, in key order, and Compliant is recomputed from the final list. A nil
+// hardening, or a result with no matching policy, leaves the result as it was.
+// results is never modified.
+func WithDefenderHardening(results []Result, bundle contract.PolicyBundleResponse, hardening *contract.DefenderHardening) []Result {
+	out := make([]Result, 0, len(results))
+	states := map[string]string{}
+	if hardening != nil {
+		for _, item := range hardening.Items {
+			if _, seen := states[item.Item]; !seen {
+				states[item.Item] = item.State
+			}
+		}
+	}
+
+	for _, r := range results {
+		violations := make([]string, 0, len(r.Violations))
+		violations = append(violations, r.Violations...)
+		next := Result{PolicyId: r.PolicyId, Version: r.Version, Compliant: r.Compliant, Violations: violations}
+
+		policy, found := findPolicy(bundle, r.PolicyId, r.Version)
+		if hardening == nil || !found {
+			out = append(out, next)
+			continue
+		}
+		for _, entry := range defenderKeyItems {
+			if !defenderKeyRequired(policy.Settings, entry.key) {
+				continue
+			}
+			var failing []string
+			for _, item := range entry.items {
+				if defenderFailingStates[states[item]] {
+					failing = append(failing, item)
+				}
+			}
+			if len(failing) > 0 {
+				next.Violations = append(next.Violations, ViolationDefenderPrefix+entry.key+":"+strings.Join(failing, ","))
+			}
+		}
+		next.Compliant = len(next.Violations) == 0
+		out = append(out, next)
+	}
+	return out
+}
+
+// findPolicy returns the bundle policy with this policyId and version.
+func findPolicy(bundle contract.PolicyBundleResponse, policyID string, version int) (contract.Policy, bool) {
+	for _, p := range bundle.Policies {
+		if p.PolicyID == policyID && p.Version == version {
+			return p, true
+		}
+	}
+	return contract.Policy{}, false
+}
+
+// defenderKeyRequired reports whether settings require a Defender key: true
+// for the boolean keys, "audit" or "block" for the ransomware key.
+func defenderKeyRequired(settings map[string]any, key string) bool {
+	if key == SettingDefenderRansomwareProtection {
+		mode, _ := settings[key].(string)
+		return mode == "audit" || mode == "block"
+	}
+	required, ok := boolSetting(settings, key)
+	return ok && required
+}
 
 // day is the unit the OS update age is measured in.
 const day = 24 * time.Hour

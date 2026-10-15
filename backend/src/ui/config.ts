@@ -73,3 +73,30 @@ export function adminClientConfig(env: ConfigEnv, host: string): AdminClientConf
     scope: adminScope(clientId),
   };
 }
+
+/** The scope name the Applications page signs in with (TASK-049). */
+export const USER_SCOPE_NAME = 'MDM.User';
+
+/** The access-token scope the Applications page asks for. */
+export function userScope(clientId: string): string {
+  return `api://${clientId}/${USER_SCOPE_NAME}`;
+}
+
+/**
+ * The Applications page's client configuration (`GET /applications/config.json`),
+ * or `null` when Entra is not configured. The same four keys as the console's,
+ * redirecting back to `/applications` and asking for `MDM.User`.
+ */
+export function userClientConfig(env: ConfigEnv, host: string): AdminClientConfig | null {
+  const tenantId = configured(env.ENTRA_TENANT_ID);
+  const clientId = configured(env.ENTRA_CLIENT_ID);
+  if (tenantId === null || clientId === null) {
+    return null;
+  }
+  return {
+    tenantId,
+    clientId,
+    redirectUri: `https://${host}/applications`,
+    scope: userScope(clientId),
+  };
+}

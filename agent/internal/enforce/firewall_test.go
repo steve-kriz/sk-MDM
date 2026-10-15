@@ -265,3 +265,122 @@ func contains(s, substr string) bool {
 	}
 	return false
 }
+
+// ============================================================================
+// AC5: the Actions recorder.
+// ============================================================================
+
+// TestScenario_AC5_TurningTheFirewallOnIsRecorded covers:
+//
+//	Given firewallEnabled true, a posture with the firewall off and a runner
+//	     answering exit 0
+//	When the firewall enforcer applies
+//	Then Actions was called once with "enforce.firewall_enabled" and empty details
+func TestScenario_AC5_TurningTheFirewallOnIsRecorded(t *testing.T) {
+	runner := fake.NewCommandRunner()
+	var calls []string
+	var lastDetails map[string]string
+	fw := &Firewall{Runner: runner, GOOS: "windows", Actions: func(actionType string, details map[string]string) {
+		calls = append(calls, actionType)
+		lastDetails = details
+	}}
+	effective := map[string]any{SettingFirewallEnabled: true}
+	posture := contract.Posture{Firewall: contract.Firewall{Enabled: false}}
+
+	err := fw.Apply(context.Background(), effective, posture)
+	if err != nil {
+		t.Fatalf("Apply returned an error: %v", err)
+	}
+	if len(calls) != 1 || calls[0] != contract.ActionFirewallEnabled {
+		t.Fatalf("Actions calls = %v, want exactly one call with %q", calls, contract.ActionFirewallEnabled)
+	}
+	if len(lastDetails) != 0 {
+		t.Errorf("details = %+v, want empty", lastDetails)
+	}
+}
+
+// TestScenario_AC5_ANilActionsRecordsNothingAndBehavesAsBefore covers: "A nil
+// Actions records nothing and Apply behaves as before" -- no panic and the
+// firewall command still runs.
+func TestScenario_AC5_ANilActionsRecordsNothingAndBehavesAsBefore(t *testing.T) {
+	runner := fake.NewCommandRunner()
+	fw := &Firewall{Runner: runner, GOOS: "windows"}
+	effective := map[string]any{SettingFirewallEnabled: true}
+	posture := contract.Posture{Firewall: contract.Firewall{Enabled: false}}
+
+	err := fw.Apply(context.Background(), effective, posture)
+	if err != nil {
+		t.Fatalf("Apply returned an error: %v", err)
+	}
+	if len(runner.Calls()) != 1 {
+		t.Fatalf("expected the firewall-on command to still run, got %d calls", len(runner.Calls()))
+	}
+}
+
+// TestScenario_AC5Outline_AFirewallThatWasNotTurnedOnRecordsNothing covers the
+// scenario outline: firewallEnabled absent, the firewall already on, the
+// runner answering exit code 1, the runner returning an error, and GOOS
+// "linux".
+func TestScenario_AC5Outline_AFirewallThatWasNotTurnedOnRecordsNothing(t *testing.T) {
+	cases := []struct {
+		name      string
+		goos      string
+		effective map[string]any
+		posture   contract.Posture
+		configure func(runner *fake.CommandRunner)
+	}{
+		{
+			name:      "firewallEnabled absent",
+			goos:      "windows",
+			effective: map[string]any{},
+			posture:   contract.Posture{Firewall: contract.Firewall{Enabled: false}},
+		},
+		{
+			name:      "the firewall already on",
+			goos:      "windows",
+			effective: map[string]any{SettingFirewallEnabled: true},
+			posture:   contract.Posture{Firewall: contract.Firewall{Enabled: true}},
+		},
+		{
+			name:      "the runner answering exit code 1",
+			goos:      "windows",
+			effective: map[string]any{SettingFirewallEnabled: true},
+			posture:   contract.Posture{Firewall: contract.Firewall{Enabled: false}},
+			configure: func(runner *fake.CommandRunner) {
+				runner.Results["powershell.exe -NoProfile -NonInteractive -Command Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True"] = platform.CommandResult{ExitCode: 1}
+			},
+		},
+		{
+			name:      "the runner returning an error",
+			goos:      "windows",
+			effective: map[string]any{SettingFirewallEnabled: true},
+			posture:   contract.Posture{Firewall: contract.Firewall{Enabled: false}},
+			configure: func(runner *fake.CommandRunner) {
+				runner.Errors["powershell.exe -NoProfile -NonInteractive -Command Set-NetFirewallProfile -Profile Domain,Public,Private -Enabled True"] = errors.New("cannot start")
+			},
+		},
+		{
+			name:      `GOOS "linux"`,
+			goos:      "linux",
+			effective: map[string]any{SettingFirewallEnabled: true},
+			posture:   contract.Posture{Firewall: contract.Firewall{Enabled: false}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := fake.NewCommandRunner()
+			if tc.configure != nil {
+				tc.configure(runner)
+			}
+			called := false
+			fw := &Firewall{Runner: runner, GOOS: tc.goos, Actions: func(string, map[string]string) { called = true }}
+
+			_ = fw.Apply(context.Background(), tc.effective, tc.posture)
+
+			if called {
+				t.Errorf("Actions was called for case %q, want no call", tc.name)
+			}
+		})
+	}
+}

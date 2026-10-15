@@ -3,21 +3,29 @@
  *
  * Per value, a non-empty environment variable wins (`MDM_DOMAIN_NAME`,
  * `MDM_CERTIFICATE_ARN`, `MDM_HOSTED_ZONE_ID`), then a non-empty string CDK
- * context value (`domainName`, `certificateArn`, `hostedZoneId`). `domainName`
- * falls back to `DEFAULT_DOMAIN_NAME`; the other two fall back to `undefined`.
+ * context value (`domainName`, `certificateArn`, `hostedZoneId`). The
+ * certificate ARN then falls back to the `MDM_CERTIFICATE_ARN` key of the
+ * deploy secret (`prod/sk-mdm`), trimmed. `domainName` falls back to
+ * `DEFAULT_DOMAIN_NAME`; the other two fall back to `undefined`.
  *
- * Pure: the environment and the context lookup are passed in, so the
- * precedence can be tested without an `App`.
+ * Pure: the environment, the context lookup and the loaded secret are passed
+ * in, so the precedence can be tested without an `App` or AWS.
  */
+import type { DeploySecrets } from './deploy-secrets.js';
 
 /** The main public domain SK-MDM is served on. */
 export const DEFAULT_DOMAIN_NAME = 'mdm.officehq.cc';
+
+/** The deploy-secret key holding the us-east-1 ACM certificate ARN. */
+export const CERTIFICATE_ARN_SECRET_KEY = 'MDM_CERTIFICATE_ARN';
 
 export interface DomainSettingsInput {
   /** `process.env`, or a fake in a test. */
   readonly env: Record<string, string | undefined>;
   /** CDK context lookup, e.g. `(k) => app.node.tryGetContext(k)`. */
   readonly context: (key: string) => unknown;
+  /** The loaded deploy secret; only `MDM_CERTIFICATE_ARN` is read from it. */
+  readonly secret?: Pick<DeploySecrets, 'get'>;
 }
 
 export interface DomainSettings {
@@ -35,10 +43,16 @@ function resolve(input: DomainSettingsInput, envName: string, contextKey: string
   return typeof fromContext === 'string' && fromContext !== '' ? fromContext : undefined;
 }
 
+function fromSecret(input: DomainSettingsInput, key: string): string | undefined {
+  const value = input.secret?.get(key)?.trim();
+  return value === undefined || value === '' ? undefined : value;
+}
+
 export function resolveDomainSettings(input: DomainSettingsInput): DomainSettings {
   return {
     domainName: resolve(input, 'MDM_DOMAIN_NAME', 'domainName') ?? DEFAULT_DOMAIN_NAME,
-    certificateArn: resolve(input, 'MDM_CERTIFICATE_ARN', 'certificateArn'),
+    certificateArn:
+      resolve(input, 'MDM_CERTIFICATE_ARN', 'certificateArn') ?? fromSecret(input, CERTIFICATE_ARN_SECRET_KEY),
     hostedZoneId: resolve(input, 'MDM_HOSTED_ZONE_ID', 'hostedZoneId'),
   };
 }

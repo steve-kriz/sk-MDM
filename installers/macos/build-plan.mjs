@@ -5,7 +5,7 @@
  * signed package `productsign` produces.
  *
  *   node installers/macos/build-plan.mjs --version 1.2.3 --arch arm64 \
- *     --collection-url https://mdm.example/ --enroll-token t1 --dry-run
+ *     --collection-url https://mdm.example/ --tenant-id <tenant> --client-id <client> --dry-run
  *
  * The planner never spawns a process. `pkgbuild`, `productbuild`,
  * `productsign` and `notarytool` exist only on a Mac, so installers/macos/build.sh
@@ -44,6 +44,10 @@ const DEFAULT_VERSION = '0.0.0-dev';
  */
 export const COLLECTION_URL_MESSAGE = 'collection url must be an https url';
 
+/** The refusals for an Entra tenant or client id the package cannot carry. */
+export const TENANT_ID_MESSAGE = 'tenant id is required (letters, digits, ".", "-" and "_" only)';
+export const CLIENT_ID_MESSAGE = 'client id is required (letters, digits, ".", "-" and "_" only)';
+
 /** The refusal for an architecture the agent is not built for. */
 export const ARCH_MESSAGE = 'unsupported arch';
 
@@ -81,13 +85,28 @@ export function isCollectionUrl(raw) {
 }
 
 /**
+ * True when `raw` is a usable Entra tenant or client id: a GUID or a domain
+ * name. build.sh substitutes it into postinstall with sed, so nothing that
+ * could break out of the substitution or the shell string is accepted.
+ */
+export function isEntraId(raw) {
+  return typeof raw === 'string' && /^[A-Za-z0-9._-]+$/.test(raw);
+}
+
+/**
  * Everything wrong with these inputs, in order, as the messages the CLI prints.
  * An empty array means the inputs are usable.
  */
-export function problems({ collectionUrl, arch } = {}) {
+export function problems({ collectionUrl, tenantId, clientId, arch } = {}) {
   const found = [];
   if (!isCollectionUrl(collectionUrl)) {
     found.push(COLLECTION_URL_MESSAGE);
+  }
+  if (!isEntraId(tenantId)) {
+    found.push(TENANT_ID_MESSAGE);
+  }
+  if (!isEntraId(clientId)) {
+    found.push(CLIENT_ID_MESSAGE);
   }
   if (!ARCHES.includes(arch)) {
     found.push(ARCH_MESSAGE);
@@ -103,16 +122,15 @@ export function problems({ collectionUrl, arch } = {}) {
  * supplied. Without an identity there is no `signCommand`: an unsigned package
  * is not a package this project ships, so the caller is expected to stop.
  *
- * `enrollToken` is part of the inputs because it is what the installer writes
- * into the config; it does not appear in any path and is never logged.
+ * The collection URL, tenant id and client id are part of the inputs because
+ * build.sh bakes them into postinstall; they appear in no path.
  *
- * Throws on a collection URL that is not https or an architecture the agent is
- * not built for; the error carries the CLI's exit code on `exitCode`.
+ * Throws on a collection URL that is not https, an empty or malformed tenant
+ * or client id, or an architecture the agent is not built for; the error
+ * carries the CLI's exit code on `exitCode`.
  */
-export function planPackage({ version, arch, collectionUrl, enrollToken, signIdentity } = {}) {
-  void enrollToken;
-
-  const found = problems({ collectionUrl, arch });
+export function planPackage({ version, arch, collectionUrl, tenantId, clientId, signIdentity } = {}) {
+  const found = problems({ collectionUrl, tenantId, clientId, arch });
   if (found.length > 0) {
     const error = new Error(found[0]);
     error.exitCode = EXIT_USAGE;
@@ -145,11 +163,18 @@ const FLAGS = {
   '--version': 'version',
   '--arch': 'arch',
   '--collection-url': 'collectionUrl',
-  '--enroll-token': 'enrollToken',
+  '--tenant-id': 'tenantId',
+  '--client-id': 'clientId',
 };
 
 function parseArgs(argv) {
-  const options = { version: undefined, arch: undefined, collectionUrl: undefined, enrollToken: undefined };
+  const options = {
+    version: undefined,
+    arch: undefined,
+    collectionUrl: undefined,
+    tenantId: undefined,
+    clientId: undefined,
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--dry-run') {

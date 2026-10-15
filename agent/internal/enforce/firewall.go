@@ -23,6 +23,9 @@ const (
 type Firewall struct {
 	Runner platform.CommandRunner
 	GOOS   string
+	// Actions, when set, is told once each time Apply turned the firewall on
+	// (the command exited 0). Nil records nothing.
+	Actions func(actionType string, details map[string]string)
 }
 
 // Name is "firewall".
@@ -49,6 +52,9 @@ func (f *Firewall) Apply(ctx context.Context, effective map[string]any, posture 
 	if result.ExitCode != 0 {
 		return fmt.Errorf("turn firewall on: %s exited with code %d: %s",
 			name, result.ExitCode, strings.TrimSpace(result.Stderr))
+	}
+	if f.Actions != nil {
+		f.Actions(contract.ActionFirewallEnabled, map[string]string{})
 	}
 	return nil
 }

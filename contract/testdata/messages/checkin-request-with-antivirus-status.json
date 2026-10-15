@@ -1,0 +1,126 @@
+{
+  "collectedAt": "2026-10-02T07:15:00Z",
+  "inventory": {
+    "hardware": {
+      "manufacturer": "Dell Inc.",
+      "model": "Latitude 7440",
+      "serialNumber": "JH4K7Z2",
+      "cpu": "13th Gen Intel(R) Core(TM) i7-1365U",
+      "ramBytes": 34359738368,
+      "diskBytes": 1023741952000
+    },
+    "os": {
+      "name": "Windows 11 Enterprise",
+      "version": "10.0.22631",
+      "build": "22631.4317",
+      "architecture": "x86_64"
+    },
+    "software": [
+      {
+        "name": "Google Chrome",
+        "version": "129.0.6668.90",
+        "publisher": "Google LLC",
+        "installedAt": "2026-09-18T04:02:11Z"
+      }
+    ]
+  },
+  "posture": {
+    "diskEncryption": {
+      "enabled": true,
+      "method": "bitlocker"
+    },
+    "firewall": {
+      "enabled": true
+    },
+    "antivirus": {
+      "name": "Microsoft Defender Antivirus",
+      "enabled": true,
+      "definitionsAgeDays": 1
+    },
+    "osUpdate": {
+      "lastCheckedAt": "2026-10-01T18:30:00Z",
+      "pendingCount": 3,
+      "rebootRequired": false
+    },
+    "localAdmins": [
+      "CONTOSO\\skrizanovic",
+      "BUILTIN\\Administrator"
+    ]
+  },
+  "antivirusFindings": [
+    {
+      "findingId": "{7C1F0D4E-2B8A-4C36-9E51-0A3D6B9F2E11}",
+      "threatName": "Trojan:Win32/Wacatac.B!ml",
+      "severity": "severe",
+      "detectedAt": "2026-10-02T06:58:12Z",
+      "resources": [
+        "file:_C:\\Users\\skrizanovic\\Downloads\\invoice.exe"
+      ],
+      "remediated": true,
+      "category": "Trojan",
+      "status": "quarantined",
+      "action": "quarantine",
+      "active": false,
+      "lastStatusChangeAt": "2026-10-02T07:00:00Z",
+      "remediatedAt": "2026-10-02T07:00:00Z",
+      "processName": "C:\\Windows\\explorer.exe",
+      "user": "CONTOSO\\skrizanovic"
+    }
+  ],
+  "antivirusStatus": {
+    "product": "Microsoft Defender",
+    "defenderAvailable": true,
+    "runningMode": "Normal",
+    "protection": {
+      "amServiceEnabled": true,
+      "antispywareEnabled": true,
+      "antivirusEnabled": true,
+      "behaviorMonitorEnabled": true,
+      "ioavProtectionEnabled": true,
+      "onAccessProtectionEnabled": true,
+      "realTimeProtectionEnabled": true,
+      "nisEnabled": true,
+      "tamperProtected": true
+    },
+    "versions": {
+      "engine": "1.1.24090.11",
+      "product": "4.18.24090.11",
+      "service": "4.18.24090.11",
+      "nisEngine": "1.1.24090.11",
+      "antivirusSignature": "1.419.163.0",
+      "antispywareSignature": "1.419.163.0",
+      "nisSignature": "1.419.163.0",
+      "xprotectDefinitions": null,
+      "xprotectRemediator": null
+    },
+    "signatures": {
+      "antivirusLastUpdatedAt": "2026-10-01T20:12:00Z",
+      "antivirusAgeDays": 1,
+      "antispywareLastUpdatedAt": "2026-10-01T20:12:00Z",
+      "antispywareAgeDays": 1,
+      "nisLastUpdatedAt": "2026-10-01T20:12:00Z",
+      "nisAgeDays": 1,
+      "outOfDate": false
+    },
+    "scans": {
+      "quickStartedAt": "2026-10-01T02:00:00Z",
+      "quickEndedAt": "2026-10-01T02:06:31Z",
+      "quickAgeDays": 1,
+      "quickOverdue": false,
+      "fullStartedAt": null,
+      "fullEndedAt": null,
+      "fullAgeDays": null,
+      "fullOverdue": false,
+      "fullRequired": false
+    },
+    "computerState": 0,
+    "rebootRequired": false,
+    "securityCenterProducts": [
+      {
+        "name": "Windows Defender",
+        "state": "on",
+        "definitionsUpToDate": true
+      }
+    ]
+  }
+}

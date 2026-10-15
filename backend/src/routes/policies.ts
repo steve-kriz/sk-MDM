@@ -18,9 +18,11 @@
  *   1. `verifyDeviceRequest`        -> its own `{status, body}`, unchanged
  *   2. path device == signed device -> 403 device_mismatch
  *
- * so a device can only ever learn its own configuration. Nothing is written
- * here at all; the bundle is derived from stored policies on every request
- * rather than cached, so unassigning a policy takes effect on the next poll.
+ * so a device can only ever learn its own configuration. The bundle is never
+ * written: it is derived from stored policies on every request rather than
+ * cached, so unassigning a policy takes effect on the next poll. The only write
+ * is the best-effort last-seen refresh of the device profile on a 200 answer
+ * (see `./deviceContact.ts`), which never changes the response.
  *
  * A device with no membership, or whose groups carry no assignment, is a
  * perfectly ordinary answer: 200 with an empty bundle. It is never a 404, since
@@ -38,6 +40,7 @@ import { verifyDeviceRequest, type DeviceAuthResult, type EpochSecondsClock } fr
 import type { RouteHandler, RouteRequest, RouteResult, Router, RouterRequest } from '../http/router.js';
 import { mergePolicySettings } from '../policies/merge.js';
 import { readAssignedPolicies } from '../policies/resolve.js';
+import { recordDeviceContact } from './deviceContact.js';
 
 /** Path this route is registered on. */
 export const POLICY_BUNDLE_PATH = '/api/v1/devices/{deviceId}/policies';
@@ -45,12 +48,14 @@ export const POLICY_BUNDLE_PATH = '/api/v1/devices/{deviceId}/policies';
 /**
  * The storage operations this route needs: the structural subset of
  * `TableClient` (see `src/db/table.ts`) a fake has to implement. `putIfAbsent`
- * is here only because `verifyDeviceRequest` burns a nonce with it.
+ * is here only because `verifyDeviceRequest` burns a nonce with it; `update`
+ * only refreshes the device's last-seen.
  */
 export interface PolicyBundleTable {
   get(key: TableKey, fields?: RequestFields): Promise<Item | undefined>;
   putIfAbsent(item: Item, fields?: RequestFields): Promise<WriteOutcome>;
   query(request?: QueryRequest): Promise<QueryPage>;
+  update(key: TableKey, fields?: RequestFields): Promise<Item | undefined>;
 }
 
 /** Current time: integer epoch seconds, or any instant a `Date` can be built from. */
@@ -164,6 +169,9 @@ export function createPolicyBundleHandler(source: PolicyBundleDependencySource):
       effectiveSettings,
       conflicts,
     };
+
+    await recordDeviceContact(deps.table, deviceId, toDate(clock()));
+
     return { statusCode: 200, body };
   };
 }

@@ -8,7 +8,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert';
-import { collectionUrlFor, windowsInstallCommand, MACOS_INSTALL_COMMAND } from '../../dist/ui/public/landing.js';
+import { readFileSync } from 'node:fs';
+import { collectionUrlFor, windowsInstallCommand, MACOS_INSTALL_COMMAND, versionLabel, DOWNLOADS_PATH } from '../../dist/ui/public/landing.js';
 import { ADMIN_PAGE_PATH, signedInLocation } from '../../dist/ui/public/app.js';
 
 test('Unit - collectionUrlFor returns origin followed by /', async (t) => {
@@ -26,14 +27,36 @@ test('Unit - collectionUrlFor with different origins', async (t) => {
 
 test('Unit - windowsInstallCommand returns msiexec command with collectionUrl', async (t) => {
   const result = windowsInstallCommand('https://mdm.example.com/');
-  const expected = 'msiexec /i <downloaded .msi> /qn COLLECTIONURL=https://mdm.example.com/ ENROLLTOKEN=<enrollment token>';
+  const expected = 'msiexec /i <downloaded .msi> /qn COLLECTIONURL=https://mdm.example.com/ OWNERSHIP=officehq';
   assert.strictEqual(result, expected, 'should return correct msiexec command');
 });
 
 test('Unit - windowsInstallCommand with different collectionUrl', async (t) => {
   const result = windowsInstallCommand('https://custom.domain.com/');
   assert.ok(result.includes('COLLECTIONURL=https://custom.domain.com/'), 'should include collectionUrl in command');
-  assert.ok(result.includes('ENROLLTOKEN=<enrollment token>'), 'should include enrollment token placeholder');
+  assert.ok(!result.includes('ENROLLTOKEN'), 'the installer no longer takes an enrollment token');
+  assert.ok(result.includes('OWNERSHIP=officehq'), 'should name the device type');
+});
+
+test('Unit - versionLabel names the published version, or says none is published', () => {
+  assert.strictEqual(versionLabel('1.2.3'), 'Version 1.2.3');
+  assert.strictEqual(versionLabel(null), 'Not yet published');
+  assert.strictEqual(versionLabel(undefined), 'Not yet published');
+  assert.strictEqual(versionLabel(''), 'Not yet published');
+});
+
+test('Unit - the landing page reads versions from /api/v1/downloads', () => {
+  assert.strictEqual(DOWNLOADS_PATH, '/api/v1/downloads');
+});
+
+test('Landing page shows a version slot per download and no Administrators section', () => {
+  const html = readFileSync(new URL('../../src/ui/public/landing.html', import.meta.url), 'utf8');
+  for (const platform of ['windows-x64', 'windows-arm64', 'macos-amd64', 'macos-arm64']) {
+    assert.ok(html.includes(`id="version-${platform}"`), `version slot for ${platform}`);
+  }
+  assert.ok(!/Administrators/.test(html), 'no Administrators heading');
+  assert.ok(!html.includes('href="/admin"'), 'no admin console link');
+  assert.ok(!/enrollment token/i.test(html), 'no enrollment token instructions');
 });
 
 test('Unit - MACOS_INSTALL_COMMAND is correct', async (t) => {

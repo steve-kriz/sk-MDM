@@ -274,3 +274,513 @@ test('Unit: Group list shows created groups', async (t) => {
   assert(found.groupId);
   assert(found.createdAt);
 });
+
+// ============================================================================
+// Enhanced FakeTable with delete() and gsi1 query support for policy assignments
+// ============================================================================
+
+class EnhancedFakeTable extends FakeTable {
+  async delete(keyObj) {
+    const fullKey = `${keyObj.pk}#${keyObj.sk}`;
+    this.items.delete(fullKey);
+  }
+
+  async query(request) {
+    const items = [];
+    const { KeyConditionExpression, ExpressionAttributeNames, ExpressionAttributeValues, IndexName, limit = 50, cursor } = request;
+
+    let startIdx = 0;
+    if (cursor) {
+      const decoded = JSON.parse(Buffer.from(cursor, 'base64').toString());
+      startIdx = decoded.offset || 0;
+    }
+
+    for (const [, item] of this.items) {
+      if (IndexName === 'gsi1') {
+        const gsi1pk = ExpressionAttributeValues[':gsi1pk'];
+        if (item.gsi1pk !== gsi1pk) continue;
+        items.push(item);
+      } else if (IndexName === 'gsi1' || !IndexName) {
+        // Handle policy assignments query on gsi1: GROUP#<id>/POLICY#<p>
+        if (request.KeyConditionExpression && request.KeyConditionExpression.includes('gsi1pk')) {
+          const gsi1pk = ExpressionAttributeValues[':gsi1pk'];
+          if (item.gsi1pk !== gsi1pk) continue;
+          items.push(item);
+        } else if (request.KeyConditionExpression && request.KeyConditionExpression.includes(':pk')) {
+          const pk = ExpressionAttributeValues[':pk'];
+          if (item.pk !== pk) continue;
+
+          if (KeyConditionExpression.includes('begins_with')) {
+            const prefix = ExpressionAttributeValues[':memberPrefix'];
+            if (!item.sk.startsWith(prefix)) continue;
+          }
+          items.push(item);
+        }
+      }
+    }
+
+    const sorted = items.sort((a, b) => {
+      const skA = a.sk || '';
+      const skB = b.sk || '';
+      return skA < skB ? 1 : -1;
+    });
+
+    const pageSize = Math.min(limit, sorted.length - startIdx);
+    const page = sorted.slice(startIdx, startIdx + pageSize);
+    const nextCursor = startIdx + pageSize < sorted.length
+      ? Buffer.from(JSON.stringify({ offset: startIdx + pageSize })).toString('base64')
+      : null;
+
+    return { items: page, cursor: nextCursor };
+  }
+}
+
+// ============================================================================
+// Scenario: AC1 - Rename a group
+// ============================================================================
+
+test('Scenario: AC1 - Rename a group updates name and gsi1sk', async (t) => {
+  const router = createRouter();
+  const table = new EnhancedFakeTable();
+  const verifier = new StubVerifier();
+  const now = new Date('2026-01-01T00:00:00Z');
+
+  registerGroupRoutes(router, { verifier, table, now: () => now, randomBytes: (n) => Buffer.alloc(n) });
+
+  // Setup: create a group
+  const createResp = await makeRequest(router, 'POST', '/admin/api/v1/groups', {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ name: 'Sydney' }),
+  });
+  assert.strictEqual(createResp.statusCode, 201);
+  const groupId = JSON.parse(createResp.body).groupId;
+
+  // Get the initial createdAt from the stored record
+  const initialRecord = await table.get({ pk: `GROUP#${groupId}`, sk: 'PROFILE' });
+  const createdAt = initialRecord.createdAt;
+
+  // When: rename the group
+  const renameResp = await makeRequest(router, 'PUT', `/admin/api/v1/groups/${groupId}`, {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ name: 'Melbourne' }),
+  });
+
+  // Then: response is 200 with new name
+  assert.strictEqual(renameResp.statusCode, 200);
+  const renameBody = JSON.parse(renameResp.body);
+  assert.strictEqual(renameBody.groupId, groupId);
+  assert.strictEqual(renameBody.name, 'Melbourne');
+
+  // And: gsi1sk is updated
+  const record = await table.get({ pk: `GROUP#${groupId}`, sk: 'PROFILE' });
+  assert(record);
+  assert.strictEqual(record.name, 'Melbourne');
+
+  // And: createdAt is unchanged
+  assert.strictEqual(record.createdAt, createdAt);
+
+  // And: list shows new name
+  const listResp = await makeRequest(router, 'GET', '/admin/api/v1/groups', {
+    headers: { authorization: 'Bearer valid-token' },
+    query: { limit: '50' },
+  });
+  const listBody = JSON.parse(listResp.body);
+  const found = listBody.items.find((g) => g.groupId === groupId);
+  assert(found);
+  assert.strictEqual(found.name, 'Melbourne');
+
+  // And: audit entry is recorded
+  let auditEntry = null;
+  for (const [, item] of table.items) {
+    if (item.action === 'group.renamed' && item.target === groupId) {
+      auditEntry = item;
+      break;
+    }
+  }
+  assert(auditEntry);
+  assert.strictEqual(auditEntry.detail.from, 'Sydney');
+  assert.strictEqual(auditEntry.detail.to, 'Melbourne');
+});
+
+// ============================================================================
+// Scenario: AC2 - Rename failures (empty name, unknown group)
+// ============================================================================
+
+test('Scenario: AC2 - Rename with empty name returns 400', async (t) => {
+  const router = createRouter();
+  const table = new EnhancedFakeTable();
+  const verifier = new StubVerifier();
+
+  registerGroupRoutes(router, { verifier, table });
+
+  const response = await makeRequest(router, 'PUT', '/admin/api/v1/groups/grp-a', {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ name: '' }),
+  });
+
+  assert.strictEqual(response.statusCode, 400);
+  const body = JSON.parse(response.body);
+  assert.strictEqual(body.error, 'invalid_request');
+  assert(Array.isArray(body.fields));
+  assert(body.fields.includes('name'));
+});
+
+test('Scenario: AC2 - Rename unknown group returns 404', async (t) => {
+  const router = createRouter();
+  const table = new EnhancedFakeTable();
+  const verifier = new StubVerifier();
+
+  registerGroupRoutes(router, { verifier, table });
+
+  const response = await makeRequest(router, 'PUT', '/admin/api/v1/groups/grp-none', {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ name: 'X' }),
+  });
+
+  assert.strictEqual(response.statusCode, 404);
+  const body = JSON.parse(response.body);
+  assert.strictEqual(body.error, 'not_found');
+});
+
+// ============================================================================
+// Scenario: AC3 - Delete a group with cascade
+// ============================================================================
+
+test('Scenario: AC3 - Delete group cascades to memberships and assignments', async (t) => {
+  const router = createRouter();
+  const table = new EnhancedFakeTable();
+  const verifier = new StubVerifier();
+  const now = new Date('2026-10-02T10:00:00Z');
+
+  registerGroupRoutes(router, { verifier, table, now: () => now, randomBytes: (n) => Buffer.alloc(n) });
+
+  // Setup: add devices
+  await table.put({ ...deviceProfile('dev-1'), deviceId: 'dev-1', hostname: 'host-1' });
+  await table.put({ ...deviceProfile('dev-2'), deviceId: 'dev-2', hostname: 'host-2' });
+
+  // Create group
+  const createResp = await makeRequest(router, 'POST', '/admin/api/v1/groups', {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ name: 'TestGroup' }),
+  });
+  const groupId = JSON.parse(createResp.body).groupId;
+
+  // Add members
+  await makeRequest(router, 'POST', `/admin/api/v1/groups/${groupId}/members`, {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ deviceIds: ['dev-1', 'dev-2'] }),
+  });
+
+  // Setup: add policy assignments (manually, since we're testing cascade)
+  const { policyAssignment } = await import('../../dist/db/keys.js');
+  await table.put({
+    ...policyAssignment('pol-1', groupId),
+    gsi1pk: `GROUP#${groupId}`,
+    gsi1sk: `POLICY#pol-1`,
+    policyId: 'pol-1',
+  });
+  await table.put({
+    ...policyAssignment('pol-2', groupId),
+    gsi1pk: `GROUP#${groupId}`,
+    gsi1sk: `POLICY#pol-2`,
+    policyId: 'pol-2',
+  });
+
+  // When: delete the group with confirmation
+  const deleteResp = await makeRequest(router, 'DELETE', `/admin/api/v1/groups/${groupId}`, {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ confirm: true }),
+  });
+
+  // Then: response is 200
+  assert.strictEqual(deleteResp.statusCode, 200);
+  const deleteBody = JSON.parse(deleteResp.body);
+  assert.strictEqual(deleteBody.groupId, groupId);
+  assert.strictEqual(deleteBody.membersRemoved, 2);
+  assert.strictEqual(deleteBody.assignmentsRemoved, 2);
+
+  // And: group record is deleted
+  const groupRecord = await table.get({ pk: `GROUP#${groupId}`, sk: 'PROFILE' });
+  assert.strictEqual(groupRecord, undefined);
+
+  // And: memberships are deleted
+  const member1 = await table.get({ pk: `GROUP#${groupId}`, sk: 'MEMBER#dev-1' });
+  assert.strictEqual(member1, undefined);
+
+  // And: policy assignments are deleted
+  const assign1 = await table.get({ pk: `POLICY#pol-1`, sk: `ASSIGN#${groupId}` });
+  assert.strictEqual(assign1, undefined);
+
+  // And: audit entry is recorded
+  let auditEntry = null;
+  for (const [, item] of table.items) {
+    if (item.action === 'group.deleted' && item.target === groupId) {
+      auditEntry = item;
+      break;
+    }
+  }
+  assert(auditEntry);
+  assert.strictEqual(auditEntry.detail.membersRemoved, 2);
+  assert.strictEqual(auditEntry.detail.assignmentsRemoved, 2);
+});
+
+// ============================================================================
+// Scenario: AC4 - Delete failures (no confirmation, unknown group)
+// ============================================================================
+
+test('Scenario: AC4 - Delete without confirmation returns 409', async (t) => {
+  const router = createRouter();
+  const table = new EnhancedFakeTable();
+  const verifier = new StubVerifier();
+
+  registerGroupRoutes(router, { verifier, table });
+
+  // Setup: create a group
+  const createResp = await makeRequest(router, 'POST', '/admin/api/v1/groups', {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ name: 'TestGroup' }),
+  });
+  const groupId = JSON.parse(createResp.body).groupId;
+
+  // When: try to delete without confirmation
+  const response = await makeRequest(router, 'DELETE', `/admin/api/v1/groups/${groupId}`, {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({}),
+  });
+
+  // Then: response is 409
+  assert.strictEqual(response.statusCode, 409);
+  const body = JSON.parse(response.body);
+  assert.strictEqual(body.error, 'confirmation_required');
+
+  // And: group is not deleted
+  const record = await table.get({ pk: `GROUP#${groupId}`, sk: 'PROFILE' });
+  assert(record);
+});
+
+test('Scenario: AC4 - Delete unknown group returns 404', async (t) => {
+  const router = createRouter();
+  const table = new EnhancedFakeTable();
+  const verifier = new StubVerifier();
+
+  registerGroupRoutes(router, { verifier, table });
+
+  const response = await makeRequest(router, 'DELETE', '/admin/api/v1/groups/grp-none', {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ confirm: true }),
+  });
+
+  assert.strictEqual(response.statusCode, 404);
+  const body = JSON.parse(response.body);
+  assert.strictEqual(body.error, 'not_found');
+});
+
+// ============================================================================
+// Scenario: AC5 - After delete, group no longer carries policies to members
+// ============================================================================
+
+test('Scenario: AC5 - A deleted group no longer carries policies to its members', async (t) => {
+  const { readAssignedPolicyIds } = await import('../../dist/policies/resolve.js');
+  const { policyAssignment } = await import('../../dist/db/keys.js');
+
+  const router = createRouter();
+  const table = new EnhancedFakeTable();
+  const verifier = new StubVerifier();
+
+  registerGroupRoutes(router, { verifier, table });
+
+  // Setup: add a device
+  await table.put({ ...deviceProfile('dev-1'), deviceId: 'dev-1', hostname: 'host-1' });
+
+  // Setup: add a policy (minimal record for testing)
+  await table.put({
+    pk: 'POLICY#pol-1',
+    sk: 'PROFILE',
+    policyId: 'pol-1',
+    name: 'Test Policy',
+  });
+
+  // Setup: create a group
+  const createResp = await makeRequest(router, 'POST', '/admin/api/v1/groups', {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ name: 'TestGroup' }),
+  });
+  const groupId = JSON.parse(createResp.body).groupId;
+
+  // Setup: assign policy to group only (not direct device assignment)
+  await table.put({
+    ...policyAssignment('pol-1', groupId),
+    gsi1pk: `GROUP#${groupId}`,
+    gsi1sk: `POLICY#pol-1`,
+    policyId: 'pol-1',
+  });
+
+  // Setup: add device to group
+  await makeRequest(router, 'POST', `/admin/api/v1/groups/${groupId}/members`, {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ deviceIds: ['dev-1'] }),
+  });
+
+  // Verify: device receives policy through group
+  let assignedPolicies = await readAssignedPolicyIds(table, 'dev-1');
+  assert(assignedPolicies.includes('pol-1'), 'device should receive policy through group before delete');
+
+  // When: delete the group with confirmation
+  const deleteResp = await makeRequest(router, 'DELETE', `/admin/api/v1/groups/${groupId}`, {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ confirm: true }),
+  });
+  assert.strictEqual(deleteResp.statusCode, 200);
+
+  // Then: membership is deleted (no members remain in group)
+  const memberAfterDelete = await table.get({ pk: `GROUP#${groupId}`, sk: 'MEMBER#dev-1' });
+  assert.strictEqual(memberAfterDelete, undefined, 'membership should be deleted');
+
+  // And: policy assignment is deleted (group no longer carries policy)
+  const assignmentAfterDelete = await table.get({ pk: `POLICY#pol-1`, sk: `ASSIGN#${groupId}` });
+  assert.strictEqual(assignmentAfterDelete, undefined, 'policy assignment to group should be deleted');
+
+  // And: readAssignedPolicyIds for device excludes the policy
+  assignedPolicies = await readAssignedPolicyIds(table, 'dev-1');
+  assert(!assignedPolicies.includes('pol-1'), 'device should no longer receive policy after group delete');
+});
+
+// ============================================================================
+// Scenario: AC6 - Remove members from a group
+// ============================================================================
+
+test('Scenario: AC6 - Remove members counts only existing members', async (t) => {
+  const router = createRouter();
+  const table = new EnhancedFakeTable();
+  const verifier = new StubVerifier();
+  const now = new Date('2026-10-02T10:00:00Z');
+
+  registerGroupRoutes(router, { verifier, table, now: () => now, randomBytes: (n) => Buffer.alloc(n) });
+
+  // Setup: create group and add members
+  await table.put({ ...deviceProfile('dev-1'), deviceId: 'dev-1', hostname: 'host-1' });
+  await table.put({ ...deviceProfile('dev-2'), deviceId: 'dev-2', hostname: 'host-2' });
+
+  const createResp = await makeRequest(router, 'POST', '/admin/api/v1/groups', {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ name: 'TestGroup' }),
+  });
+  const groupId = JSON.parse(createResp.body).groupId;
+
+  await makeRequest(router, 'POST', `/admin/api/v1/groups/${groupId}/members`, {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ deviceIds: ['dev-1', 'dev-2'] }),
+  });
+
+  // When: remove dev-1, dev-9 (non-existent), and x#y (invalid key)
+  const removeResp = await makeRequest(router, 'DELETE', `/admin/api/v1/groups/${groupId}/members`, {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ deviceIds: ['dev-1', 'dev-9', 'x#y'] }),
+  });
+
+  // Then: response is 200, only dev-1 removed
+  assert.strictEqual(removeResp.statusCode, 200);
+  const removeBody = JSON.parse(removeResp.body);
+  assert.strictEqual(removeBody.removed, 1);
+
+  // And: dev-2 is still a member
+  const member2 = await table.get({ pk: `GROUP#${groupId}`, sk: 'MEMBER#dev-2' });
+  assert(member2);
+
+  // And: audit entry is recorded
+  let auditEntry = null;
+  for (const [, item] of table.items) {
+    if (item.action === 'group.members_removed' && item.target === groupId) {
+      auditEntry = item;
+      break;
+    }
+  }
+  assert(auditEntry);
+  assert.strictEqual(auditEntry.detail.removed, 1);
+  assert(Array.isArray(auditEntry.detail.deviceIds));
+  assert(auditEntry.detail.deviceIds.includes('dev-1'));
+});
+
+// ============================================================================
+// Scenario: AC7 - Remove members failures (bad body, unknown group)
+// ============================================================================
+
+test('Scenario: AC7 - Remove members with non-array deviceIds returns 400', async (t) => {
+  const router = createRouter();
+  const table = new EnhancedFakeTable();
+  const verifier = new StubVerifier();
+
+  registerGroupRoutes(router, { verifier, table });
+
+  const response = await makeRequest(router, 'DELETE', '/admin/api/v1/groups/grp-a/members', {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ deviceIds: 'dev-1' }),
+  });
+
+  assert.strictEqual(response.statusCode, 400);
+  const body = JSON.parse(response.body);
+  assert.strictEqual(body.error, 'invalid_request');
+});
+
+test('Scenario: AC7 - Remove from unknown group returns 404', async (t) => {
+  const router = createRouter();
+  const table = new EnhancedFakeTable();
+  const verifier = new StubVerifier();
+
+  registerGroupRoutes(router, { verifier, table });
+
+  const response = await makeRequest(router, 'DELETE', '/admin/api/v1/groups/grp-none/members', {
+    headers: { authorization: 'Bearer valid-token' },
+    body: JSON.stringify({ deviceIds: ['dev-1'] }),
+  });
+
+  assert.strictEqual(response.statusCode, 404);
+  const body = JSON.parse(response.body);
+  assert.strictEqual(body.error, 'not_found');
+});
+
+// ============================================================================
+// Scenario: AC11 - Authorization (no bearer token)
+// ============================================================================
+
+test('Scenario: AC11 - PUT without bearer token returns 401', async (t) => {
+  const router = createRouter();
+  const table = new EnhancedFakeTable();
+  const verifier = new StubVerifier();
+
+  registerGroupRoutes(router, { verifier, table });
+
+  const response = await makeRequest(router, 'PUT', '/admin/api/v1/groups/grp-a', {
+    body: JSON.stringify({ name: 'Test' }),
+  });
+
+  assert.strictEqual(response.statusCode, 401);
+});
+
+test('Scenario: AC11 - DELETE group without bearer token returns 401', async (t) => {
+  const router = createRouter();
+  const table = new EnhancedFakeTable();
+  const verifier = new StubVerifier();
+
+  registerGroupRoutes(router, { verifier, table });
+
+  const response = await makeRequest(router, 'DELETE', '/admin/api/v1/groups/grp-a', {
+    body: JSON.stringify({ confirm: true }),
+  });
+
+  assert.strictEqual(response.statusCode, 401);
+});
+
+test('Scenario: AC11 - DELETE members without bearer token returns 401', async (t) => {
+  const router = createRouter();
+  const table = new EnhancedFakeTable();
+  const verifier = new StubVerifier();
+
+  registerGroupRoutes(router, { verifier, table });
+
+  const response = await makeRequest(router, 'DELETE', '/admin/api/v1/groups/grp-a/members', {
+    body: JSON.stringify({ deviceIds: ['dev-1'] }),
+  });
+
+  assert.strictEqual(response.statusCode, 401);
+});

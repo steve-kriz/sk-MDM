@@ -3,7 +3,10 @@
  * compliance view the fleet reports back into.
  *
  *   POST   /admin/api/v1/policies                          -- create a policy
+ *   GET    /admin/api/v1/policies                          -- list policies, by name
+ *   POST   /admin/api/v1/policies/reindex                  -- list policies written before the index
  *   PUT    /admin/api/v1/policies/{policyId}                -- replace its settings
+ *   DELETE /admin/api/v1/policies/{policyId}                -- delete it and its assignments
  *   POST   /admin/api/v1/policies/{policyId}/assignments    -- assign it to a group
  *   DELETE /admin/api/v1/policies/{policyId}/assignments    -- take that back
  *   GET    /admin/api/v1/policies/{policyId}/compliance     -- who is violating it
@@ -14,12 +17,18 @@
  * by a verified admin (see `src/admin/router.ts`), and every dependency is
  * injected, so tests drive them with a stub verifier and a fake table.
  *
- * `settings` is a closed vocabulary: exactly the eight keys in
+ * `settings` is a closed vocabulary: exactly the sixteen keys in
  * `POLICY_SETTING_KEYS`, each of its own type and range. A key this backend
  * does not know is refused rather than stored, because an agent cannot enforce
  * a setting it has never heard of -- storing it would produce a policy the UI
  * shows and no machine applies. Every offending key is named at once, prefixed
  * `settings.`, so one round trip tells the admin everything that is wrong.
+ *
+ * A policy record lives at `keys.policy(policyId)` and carries the
+ * `keys.policyListIndex` attributes, written on create and on every `PUT` (a
+ * `PUT` may rename it), which is what makes the list a query on one `gsi1`
+ * partition rather than a scan. Records written before that index existed are
+ * picked up once by `POST /policies/reindex`, the one route that scans.
  *
  * A policy is versioned, never edited in place from the agent's point of view:
  * `PUT` stores the new settings and increments `version`, so an agent's
@@ -37,23 +46,29 @@
  */
 import { appendAudit, isoUtc } from '../audit.js';
 import {
+  GSI1_NAME,
   deviceCompliance,
   group,
   policy as policyKey,
   policyAssignment,
   policyAssignmentIndex,
+  policyListIndex,
   type TableKey,
 } from '../db/keys.js';
-import type { Item, RequestFields } from '../db/table.js';
+import type { Item, QueryPage, ScanRequest } from '../db/table.js';
 import type { RouteResult, Router } from '../http/router.js';
 import { readPolicyGroupIds } from '../policies/resolve.js';
 import { readGroupMemberIds } from './groups.js';
 import {
   adminActor,
+  adminDeleteTable,
   adminNow,
   adminRandomBytes,
   adminWriteTable,
+  isUsableCursor,
   jsonError,
+  parseLimit,
+  readCursor,
   readJsonBody,
   registerAdminRoute,
   type AdminDependencySource,
@@ -64,6 +79,9 @@ import {
 
 /** Sub-path of the policy collection. */
 export const POLICY_PATH = '/policies';
+
+/** Sub-path of the one-off re-index of policies written before the list index. */
+export const POLICY_REINDEX_PATH = '/policies/reindex';
 
 /** Sub-path of one policy. */
 export const POLICY_DETAIL_PATH = '/policies/{policyId}';
@@ -93,7 +111,28 @@ export const POLICY_SETTING_KEYS = [
   'firewallBlockedDomains',
   'firewallAllowedDomains',
   'antivirusEnabled',
+  'antivirusScanFrequency',
+  'locationTracking',
+  'defenderRealTimeProtection',
+  'defenderCloudProtection',
+  'defenderNetworkProtection',
+  'defenderRansomwareProtection',
+  'defenderReputationProtection',
+  'defenderDailySignatureUpdate',
 ] as const;
+
+/**
+ * The values `defenderRansomwareProtection` accepts. An absent key means not
+ * required; the agent switches Microsoft Defender Controlled Folder Access on
+ * in that mode and never downgrades block to audit.
+ */
+export const DEFENDER_RANSOMWARE_MODES = ['audit', 'block'] as const;
+
+/**
+ * The values `antivirusScanFrequency` accepts. An absent key means off; the
+ * agent runs a background Microsoft Defender quick scan at the chosen interval.
+ */
+export const ANTIVIRUS_SCAN_FREQUENCIES = ['off', 'daily', 'weekly', 'monthly'] as const;
 
 /**
  * What one entry of a domain list must look like: a hostname of at least two
@@ -120,6 +159,15 @@ export const POLICY_CREATED_ACTION = 'policy.created';
 
 /** The audit action recorded when a policy's settings are replaced. */
 export const POLICY_UPDATED_ACTION = 'policy.updated';
+
+/** The audit action recorded when a policy and its assignments are deleted. */
+export const POLICY_DELETED_ACTION = 'policy.deleted';
+
+/** The audit action recorded when policies are re-indexed into the list. */
+export const POLICY_REINDEXED_ACTION = 'policy.reindexed';
+
+/** The fields a policy list item carries. */
+export const POLICY_SUMMARY_FIELDS = ['policyId', 'name', 'version', 'settings', 'createdAt', 'updatedAt'] as const;
 
 /** The audit action recorded when a policy is assigned to a group. */
 export const POLICY_ASSIGNED_ACTION = 'policy.assigned';
@@ -156,6 +204,16 @@ const SETTING_CHECKS: Readonly<Record<(typeof POLICY_SETTING_KEYS)[number], Sett
   firewallBlockedDomains: isDomainList,
   firewallAllowedDomains: isDomainList,
   antivirusEnabled: (value) => typeof value === 'boolean',
+  antivirusScanFrequency: (value) =>
+    typeof value === 'string' && (ANTIVIRUS_SCAN_FREQUENCIES as readonly string[]).includes(value),
+  locationTracking: (value) => typeof value === 'boolean',
+  defenderRealTimeProtection: (value) => typeof value === 'boolean',
+  defenderCloudProtection: (value) => typeof value === 'boolean',
+  defenderNetworkProtection: (value) => typeof value === 'boolean',
+  defenderRansomwareProtection: (value) =>
+    typeof value === 'string' && (DEFENDER_RANSOMWARE_MODES as readonly string[]).includes(value),
+  defenderReputationProtection: (value) => typeof value === 'boolean',
+  defenderDailySignatureUpdate: (value) => typeof value === 'boolean',
 };
 
 /** The string value of an attribute, or `null` when it is not a non-empty string. */
@@ -187,25 +245,6 @@ export function offendingSettingsFields(settings: unknown): string[] {
     }
   }
   return fields;
-}
-
-/**
- * The injected table as the assignment delete needs it.
- *
- * Removing an item is not part of `AdminTable`, so the one place that
- * assumption is made is here: a table client with no `delete` is a wiring fault
- * and becomes the router's 500 rather than a silently skipped removal.
- */
-interface AdminDeleteTable extends AdminWriteTable {
-  delete(key: TableKey, fields?: RequestFields): Promise<void>;
-}
-
-function adminDeleteTable(table: AdminTable): AdminDeleteTable {
-  const writable = adminWriteTable(table);
-  if (typeof (writable as Partial<AdminDeleteTable>).delete !== 'function') {
-    throw new Error('removing an assignment needs a table client with delete()');
-  }
-  return writable as AdminDeleteTable;
 }
 
 /**
@@ -242,6 +281,7 @@ export const handlePolicyCreate: AdminRouteHandler = async (req, deps): Promise<
 
   await table.put({
     ...policyKey(policyId),
+    ...policyListIndex(name as string),
     policyId,
     name,
     settings,
@@ -298,11 +338,16 @@ export const handlePolicyUpdate: AdminRouteHandler = async (req, deps): Promise<
   const at = adminNow(deps);
   const previousVersion = typeof existing.version === 'number' ? existing.version : 0;
   const version = previousVersion + 1;
+  const storedName = name ?? stringOrNull(existing.name);
 
+  // The list index is written again on every update: a rename moves the
+  // policy's sort position, and a record written before the index existed
+  // joins the list the first time it is edited.
   await table.put({
     ...key,
+    ...policyListIndex(storedName ?? policyId),
     policyId,
-    name: name ?? stringOrNull(existing.name),
+    name: storedName,
     settings,
     version,
     createdAt: stringOrNull(existing.createdAt) ?? isoUtc(at),
@@ -318,6 +363,194 @@ export const handlePolicyUpdate: AdminRouteHandler = async (req, deps): Promise<
   });
 
   return { statusCode: 200, body: { policyId, version } };
+};
+
+/**
+ * `DELETE /admin/api/v1/policies/{policyId}` -- delete a policy and every one
+ * of its group assignments.
+ *
+ * The body must carry `{"confirm": true}`, the same gate the destructive
+ * commands use (see `src/admin/commandDispatch.ts`). The policy is looked up
+ * before the confirmation is checked, so an unknown id is a 404 either way, and
+ * nothing is deleted or audited unless the delete actually happens.
+ *
+ * The devices' `COMPLIANCE#<policyId>` items are left in place: the compliance
+ * state ignores results for policies no longer assigned, so each device that
+ * held the policy is recomputed at its next check-in.
+ */
+export const handlePolicyDelete: AdminRouteHandler = async (req, deps): Promise<RouteResult> => {
+  const policyId = req.params?.policyId ?? '';
+  // An id no key can be built from names no policy.
+  let key: TableKey;
+  try {
+    key = policyKey(policyId);
+  } catch {
+    return jsonError(404, 'not_found');
+  }
+
+  const table = adminDeleteTable(deps.table);
+  const existing = await table.get(key);
+  if (existing === undefined || existing === null) {
+    return jsonError(404, 'not_found');
+  }
+
+  const body = readJsonBody(req.body) ?? {};
+  if (body.confirm !== true) {
+    return jsonError(409, 'confirmation_required');
+  }
+
+  const at = adminNow(deps);
+  const groupIds = await readPolicyGroupIds(table, policyId);
+  let assignmentsRemoved = 0;
+  for (const groupId of groupIds) {
+    let assignmentKey: TableKey;
+    try {
+      assignmentKey = policyAssignment(policyId, groupId);
+    } catch {
+      continue;
+    }
+    await table.delete(assignmentKey);
+    assignmentsRemoved += 1;
+  }
+  await table.delete(key);
+
+  await appendAudit(table, {
+    action: POLICY_DELETED_ACTION,
+    actor: adminActor(req.claims),
+    target: policyId,
+    detail: { name: stringOrNull(existing.name), assignmentsRemoved },
+    now: at,
+  });
+
+  return { statusCode: 200, body: { policyId, assignmentsRemoved } };
+};
+
+/** A policy record's id: its own attribute, else the `POLICY#` key it lives under. */
+function policyIdOf(record: Item): string | null {
+  const { pk: prefix } = policyKey('');
+  const pk = typeof record.pk === 'string' ? record.pk : '';
+  return stringOrNull(record.policyId) ?? (pk.startsWith(prefix) ? stringOrNull(pk.slice(prefix.length)) : null);
+}
+
+/** The fields a listed policy carries (`POLICY_SUMMARY_FIELDS`), and nothing else. */
+export function policySummary(record: Item): Item {
+  return {
+    policyId: policyIdOf(record),
+    name: stringOrNull(record.name),
+    version: typeof record.version === 'number' ? record.version : null,
+    settings: isObject(record.settings) ? record.settings : {},
+    createdAt: stringOrNull(record.createdAt),
+    updatedAt: stringOrNull(record.updatedAt),
+  };
+}
+
+/**
+ * `GET /admin/api/v1/policies` -- the policies, by name, in the same
+ * `{items, cursor}` envelope and under the same `limit` rules as every other
+ * admin list (see `handleGroupList` in `src/admin/groups.ts`).
+ */
+export const handlePolicyList: AdminRouteHandler = async (req, deps): Promise<RouteResult> => {
+  const limit = parseLimit(req.query?.limit);
+  const cursor = readCursor(req.query?.cursor);
+  if (limit === null || !isUsableCursor(cursor)) {
+    return jsonError(400, 'invalid_request');
+  }
+
+  const { gsi1pk } = policyListIndex('');
+  const page = await deps.table.query({
+    IndexName: GSI1_NAME,
+    KeyConditionExpression: '#gsi1pk = :gsi1pk',
+    ExpressionAttributeNames: { '#gsi1pk': 'gsi1pk' },
+    ExpressionAttributeValues: { ':gsi1pk': gsi1pk },
+    limit,
+    cursor,
+  });
+
+  return { statusCode: 200, body: { items: page.items.map(policySummary), cursor: page.cursor } };
+};
+
+/**
+ * The injected table as the re-index needs it.
+ *
+ * Scanning is not part of `AdminTable` -- no request path should ever need it
+ * -- so the one place that assumption is made is here: a table client with no
+ * `scan` is a wiring fault and becomes the router's 500 rather than a re-index
+ * that silently reports nothing to do.
+ */
+interface AdminScanTable extends AdminWriteTable {
+  scan(request?: ScanRequest): Promise<QueryPage>;
+}
+
+function adminScanTable(table: AdminTable): AdminScanTable {
+  const writable = adminWriteTable(table);
+  if (typeof (writable as Partial<AdminScanTable>).scan !== 'function') {
+    throw new Error('re-indexing policies needs a table client with scan()');
+  }
+  return writable as AdminScanTable;
+}
+
+/**
+ * Every policy record in the table, following the scan cursor to the end.
+ *
+ * The filter keeps exactly the `POLICY#<id>` / `PROFILE` items; assignments
+ * share the partition but not the sort key, so they are never returned.
+ */
+async function scanPolicyRecords(table: AdminScanTable): Promise<Item[]> {
+  const { pk: pkPrefix, sk } = policyKey('');
+  const records: Item[] = [];
+  let cursor: string | null = null;
+  do {
+    const page: QueryPage = await table.scan({
+      FilterExpression: '#sk = :sk AND begins_with(#pk, :pkPrefix)',
+      ExpressionAttributeNames: { '#pk': 'pk', '#sk': 'sk' },
+      ExpressionAttributeValues: { ':sk': sk, ':pkPrefix': pkPrefix },
+      cursor,
+    });
+    records.push(...page.items);
+    const next = page.cursor ?? null;
+    // A cursor that does not move would page forever; treat it as the end.
+    cursor = next === cursor ? null : next;
+  } while (cursor !== null);
+  return records;
+}
+
+/**
+ * `POST /admin/api/v1/policies/reindex` -- put policies written before the
+ * list index existed into the list.
+ *
+ * Idempotent: only a record whose `gsi1` attributes are missing or stale is
+ * written, so a second run reports `{reindexed: 0}` and writes nothing but its
+ * audit entry. The record is written back whole, with only the two index
+ * attributes added. A record with no name is listed under its id, so it can
+ * still be found and renamed.
+ */
+export const handlePolicyReindex: AdminRouteHandler = async (req, deps): Promise<RouteResult> => {
+  const table = adminScanTable(deps.table);
+  const at = adminNow(deps);
+
+  let reindexed = 0;
+  for (const record of await scanPolicyRecords(table)) {
+    const policyId = policyIdOf(record);
+    if (policyId === null) {
+      continue;
+    }
+    const index = policyListIndex(stringOrNull(record.name) ?? policyId);
+    if (record.gsi1pk === index.gsi1pk && record.gsi1sk === index.gsi1sk) {
+      continue;
+    }
+    await table.put({ ...record, ...index });
+    reindexed += 1;
+  }
+
+  await appendAudit(table, {
+    action: POLICY_REINDEXED_ACTION,
+    actor: adminActor(req.claims),
+    target: 'policies',
+    detail: { reindexed },
+    now: at,
+  });
+
+  return { statusCode: 200, body: { reindexed } };
 };
 
 /**
@@ -460,7 +693,10 @@ export const handlePolicyCompliance: AdminRouteHandler = async (req, deps): Prom
 /** Register the policy routes on a router. Returns the router, so calls chain. */
 export function registerPolicyRoutes(router: Router, source: AdminDependencySource): Router {
   registerAdminRoute(router, 'POST', POLICY_PATH, handlePolicyCreate, source);
+  registerAdminRoute(router, 'GET', POLICY_PATH, handlePolicyList, source);
+  registerAdminRoute(router, 'POST', POLICY_REINDEX_PATH, handlePolicyReindex, source);
   registerAdminRoute(router, 'PUT', POLICY_DETAIL_PATH, handlePolicyUpdate, source);
+  registerAdminRoute(router, 'DELETE', POLICY_DETAIL_PATH, handlePolicyDelete, source);
   registerAdminRoute(router, 'POST', POLICY_ASSIGNMENT_PATH, handlePolicyAssign, source);
   registerAdminRoute(router, 'DELETE', POLICY_ASSIGNMENT_PATH, handlePolicyUnassign, source);
   return registerAdminRoute(router, 'GET', POLICY_COMPLIANCE_PATH, handlePolicyCompliance, source);

@@ -412,12 +412,12 @@ token-based user-session reporting.**
 
 | Route | Answer |
 |---|---|
-| `POST /api/v1/agent-auth/enrollment-token` (public route, bearer user token, `MDM.Agent` scope via `createUserTokenVerifier`) | `201 {"tokenId","token","expiresAt"}`; no/blank bearer → `401 user_token_missing`; verifier 503 → `503 jwks_unavailable`; other rejection → `401 invalid_user_token`; Entra not configured → `500 not_configured` |
+| `POST /api/v1/agent-auth/enrollment-token` (public route, bearer user token, `MDM.Agent` scope via `createUserTokenVerifier`) | `201 {"tokenId","token","expiresAt":null}`; no/blank bearer → `401 user_token_missing`; verifier 503 → `503 jwks_unavailable`; other rejection → `401 invalid_user_token`; Entra not configured → `500 not_configured` |
 | `POST /api/v1/enroll` | enrollment token only (bearer branch removed; an `Authorization` header is ignored). When the token record carries `enrolledBy`, it is copied onto the device profile and `enrolledByUpn` into the audit detail. `ownership` handling unchanged. |
 | `POST /api/v1/devices/{deviceId}/user-session` (device HMAC only, no bearer) body `{"username": "<string ≤256>" \| null}` | `200 {"user":{"username": …}}`; stores `SIGNEDINUSER` as `{deviceId, username, source:"os", reportedAt}`; bad body → `400 invalid_request` with `fields`; device checks as today |
 
 Minted token record: same shape and hashing as the admin route
-(`<16 hex>.<64 hex>`, `tokenHash`), `maxUses: 1`, `useCount: 0`, expiry 1 h,
+(`<16 hex>.<64 hex>`, `tokenHash`), `maxUses: 1`, `useCount: 0`, no expiry (no `expiresAt` stored; `expiresAt: null` in the 201),
 `label: "sign-in <upn>"`, `createdBy: "user:<upn or oid>"`,
 `enrolledBy: {oid, upn, name}`. Audited as `enrollment_token.created` with
 `detail.source: "agent-sign-in"`. The token is returned once and never logged.

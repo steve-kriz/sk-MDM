@@ -138,12 +138,12 @@ test('Document adapter - Unknown operation is rejected', async (t) => {
 
   try {
     await adapter.send({
-      operation: 'Scan',
+      operation: 'BatchWrite',
       input: { TableName: 't' },
     });
     assert.fail('should have thrown');
   } catch (error) {
-    assert.strictEqual(error.message, 'unsupported DynamoDB operation: Scan');
+    assert.strictEqual(error.message, 'unsupported DynamoDB operation: BatchWrite');
   }
 });
 
@@ -335,4 +335,23 @@ test('JWKS fetcher - Network error is handled', async (t) => {
   } catch (error) {
     assert.strictEqual(error, testError);
   }
+});
+
+test('Document adapter - Scan operation maps to ScanCommand', async (t) => {
+  const { ScanCommand } = await import('@aws-sdk/lib-dynamodb');
+  const commands = [];
+  const fakeSDKClient = {
+    send(cmd) {
+      commands.push(cmd);
+      return Promise.resolve({ Items: [] });
+    },
+  };
+
+  const adapter = createSdkDocumentClientAdapter(fakeSDKClient);
+  const input = { TableName: 't', FilterExpression: '#sk = :sk' };
+  await adapter.send({ operation: 'Scan', input });
+
+  assert.strictEqual(commands.length, 1);
+  assert.ok(commands[0] instanceof ScanCommand);
+  assert.deepStrictEqual(commands[0].input, input);
 });

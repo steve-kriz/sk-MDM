@@ -37,7 +37,10 @@ import { randomBytes as cryptoRandomBytes } from 'node:crypto';
 import { isVerifyFailure, type TokenClaims, type TokenVerifier } from '../auth/entra.js';
 import { queryAudit, type AuditPage } from '../audit.js';
 import type { TableKey } from '../db/keys.js';
-import type { GraphDirectory } from '../graph/client.js';
+import type { HeartbeatLog } from '../routes/heartbeat.js';
+import type { InstallerStore } from '../routes/downloads.js';
+import type { HasherInvoker } from '../aws/hasherInvoker.js';
+import type { ScriptGenerator } from '../aws/scriptGenerator.js';
 import { decodeCursor, type Item, type QueryPage, type QueryRequest, type RequestFields } from '../db/table.js';
 import type { RouteHandler, RouteRequest, RouteResult, Router } from '../http/router.js';
 
@@ -98,8 +101,14 @@ export interface AdminDependencies {
   now?: AdminClock;
   /** Random source used by the write routes. Defaults to `node:crypto`. */
   randomBytes?: AdminRandomBytes;
-  /** Microsoft Graph, for the user-link routes. `undefined` when Graph is not configured. */
-  graph?: GraphDirectory;
+  /** The CloudWatch Logs heartbeat store. `undefined` when `HEARTBEAT_LOG_GROUP` is not configured. */
+  heartbeatLog?: HeartbeatLog;
+  /** The S3 installer store, for the application upload routes. `undefined` when `INSTALLER_BUCKET` is not configured. */
+  installers?: InstallerStore;
+  /** Starts the asynchronous URL hasher (TASK-050). `undefined` when `HASHER_FUNCTION_NAME` is not configured. */
+  hasher?: HasherInvoker;
+  /** Generates a command-library script with Amazon Bedrock (TASK-053). `undefined` when `BEDROCK_MODEL_ID` is not configured. */
+  scriptGenerator?: ScriptGenerator;
 }
 
 /** Dependencies, or something that resolves them when the request arrives. */
@@ -135,6 +144,53 @@ export function adminWriteTable(table: AdminTable): AdminWriteTable {
     throw new Error('admin write routes need a table client with put()');
   }
   return table as AdminWriteTable;
+}
+
+/**
+ * What a delete route additionally needs: removing an item, on top of writing.
+ * Shared by every admin route that deletes (policies, groups, devices).
+ */
+export interface AdminDeleteTable extends AdminWriteTable {
+  delete(key: TableKey, fields?: RequestFields): Promise<void>;
+}
+
+/**
+ * The injected table as a delete route needs it.
+ *
+ * Removing an item is not part of `AdminTable`, so the one place that
+ * assumption is made is here: a table client with no `delete` is a wiring fault
+ * and becomes the router's 500 rather than a silently skipped removal.
+ */
+export function adminDeleteTable(table: AdminTable): AdminDeleteTable {
+  const writable = adminWriteTable(table);
+  if (typeof (writable as Partial<AdminDeleteTable>).delete !== 'function') {
+    throw new Error('admin delete routes need a table client with delete()');
+  }
+  return writable as AdminDeleteTable;
+}
+
+/**
+ * What an update route additionally needs: changing attributes of an existing
+ * item in place, on top of writing (the audit entry is a `put`). Shared by every
+ * admin route that edits part of an item (device ownership, device state).
+ */
+export interface AdminUpdateTable extends AdminWriteTable {
+  update(key: TableKey, fields?: RequestFields): Promise<Item | undefined>;
+}
+
+/**
+ * The injected table as an update route needs it.
+ *
+ * Updating an item is not part of `AdminTable`, so the one place that
+ * assumption is made is here: a table client with no `update` is a wiring fault
+ * and becomes the router's 500 rather than a silently skipped change.
+ */
+export function adminUpdateTable(table: AdminTable): AdminUpdateTable {
+  const writable = adminWriteTable(table);
+  if (typeof (writable as Partial<AdminUpdateTable>).update !== 'function') {
+    throw new Error('admin update routes need a table client with update()');
+  }
+  return writable as AdminUpdateTable;
 }
 
 /** Normalise whatever the injected clock returned into a `Date`; a number is epoch seconds. */

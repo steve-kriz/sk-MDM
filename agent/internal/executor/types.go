@@ -38,6 +38,16 @@ type PackagePayload struct {
 	TimeoutSeconds int    `json:"timeoutSeconds"`
 }
 
+// InstallApplicationPayload is the payload of an install_application command.
+// The download details are not in it: the agent fetches them when it runs the
+// command, so no presigned URL ever waits on a queued command. Extra keys (such
+// as stopOnFailure) are ignored here.
+type InstallApplicationPayload struct {
+	ApplicationID   string `json:"applicationId"`
+	ApplicationName string `json:"applicationName"`
+	TimeoutSeconds  int    `json:"timeoutSeconds"`
+}
+
 // timeoutPayload is the common part of every payload: the commands that need
 // no field of their own still honour a timeout.
 type timeoutPayload struct {
@@ -45,11 +55,43 @@ type timeoutPayload struct {
 }
 
 // The interpreters a run_script payload may name. Anything else is an invalid
-// payload rather than an attempt to run it.
+// payload rather than an attempt to run it. cmd and powershell run on
+// Windows; bash and zsh on macOS.
 const (
 	InterpreterPowerShell = "powershell"
 	InterpreterZsh        = "zsh"
+	InterpreterCmd        = "cmd"
+	InterpreterBash       = "bash"
 )
+
+// interpreterGOOS is the GOOS each interpreter runs on. An interpreter run on
+// the other platform is refused with ErrUnsupportedInterpreter.
+var interpreterGOOS = map[string]string{
+	InterpreterPowerShell: "windows",
+	InterpreterCmd:        "windows",
+	InterpreterZsh:        "darwin",
+	InterpreterBash:       "darwin",
+}
+
+// stopPayload is the part of any payload that says whether a failure stops
+// the rest of the leased batch. The backend sets it on sequenced commands
+// leased while the fleet setting is "stop".
+type stopPayload struct {
+	StopOnFailure bool `json:"stopOnFailure"`
+}
+
+// stopOnFailure reports whether a command's payload carries
+// stopOnFailure: true. A payload that does not decode is treated as false.
+func stopOnFailure(raw json.RawMessage) bool {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return false
+	}
+	var payload stopPayload
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return false
+	}
+	return payload.StopOnFailure
+}
 
 // Timeout bounds, in seconds.
 const (
@@ -73,13 +115,13 @@ func EffectiveTimeout(seconds int) time.Duration {
 
 // decodeRunScript decodes a run_script payload, reporting false for anything
 // the executor refuses to run: a missing or non-string script, and any
-// interpreter other than the two named above.
+// interpreter other than the four named above.
 func decodeRunScript(raw json.RawMessage) (RunScriptPayload, bool) {
 	var payload RunScriptPayload
 	if !decodePayload(raw, &payload) {
 		return RunScriptPayload{}, false
 	}
-	if payload.Interpreter != InterpreterPowerShell && payload.Interpreter != InterpreterZsh {
+	if _, known := interpreterGOOS[payload.Interpreter]; !known {
 		return RunScriptPayload{}, false
 	}
 	if strings.TrimSpace(payload.Script) == "" {
@@ -97,6 +139,19 @@ func decodePackage(raw json.RawMessage) (PackagePayload, bool) {
 	}
 	if strings.TrimSpace(payload.PackageID) == "" {
 		return PackagePayload{}, false
+	}
+	return payload, true
+}
+
+// decodeInstallApplication decodes an install_application payload, reporting
+// false when applicationId is absent, empty or not a string.
+func decodeInstallApplication(raw json.RawMessage) (InstallApplicationPayload, bool) {
+	var payload InstallApplicationPayload
+	if !decodePayload(raw, &payload) {
+		return InstallApplicationPayload{}, false
+	}
+	if strings.TrimSpace(payload.ApplicationID) == "" {
+		return InstallApplicationPayload{}, false
 	}
 	return payload, true
 }

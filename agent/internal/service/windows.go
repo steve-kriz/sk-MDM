@@ -36,13 +36,32 @@ func BinPath(binary string) string {
 	return `"` + binary + `" run`
 }
 
-// installWindows registers the service with the service control manager.
+// installWindows registers the service with the service control manager and
+// configures its recovery actions.
 func installWindows(ctx context.Context, cfg Config) error {
-	return runSC(ctx, cfg, "create", Name,
+	if err := runSC(ctx, cfg, "create", Name,
 		"binPath=", BinPath(cfg.BinaryPath),
 		"start=", startAutomatic,
 		"DisplayName=", DisplayName,
-	)
+	); err != nil {
+		return err
+	}
+	return ensureRecoveryWindows(ctx, cfg)
+}
+
+// ensureRecoveryWindows sets the service's failure actions: restart after five
+// seconds, three times, with the count reset after a day, and the failure flag
+// so a service that stops with a non-zero exit code counts as failed. That is
+// what restarts the agent after a self-update, when it exits with ExitRestart,
+// and after a real crash. Both calls are idempotent.
+func ensureRecoveryWindows(ctx context.Context, cfg Config) error {
+	if err := runSC(ctx, cfg, "failure", Name,
+		"reset=", "86400",
+		"actions=", "restart/5000/restart/5000/restart/5000",
+	); err != nil {
+		return err
+	}
+	return runSC(ctx, cfg, "failureflag", Name, "1")
 }
 
 // uninstallWindows removes the registration.
@@ -63,36 +82,6 @@ func uninstallWindows(ctx context.Context, cfg Config) error {
 		return err
 	}
 	return runSC(ctx, cfg, "delete", Name)
-}
-
-// errServiceAlreadyRunning is what sc.exe exits with when a start is asked for
-// a service that is running or still stopping (ERROR_SERVICE_ALREADY_RUNNING).
-// A restart is issued by the process being stopped, so this is the ordinary
-// case rather than a failure.
-const errServiceAlreadyRunning = 1056
-
-// restartWindows asks the service control manager to stop the agent and start
-// it again.
-//
-// `sc.exe stop` returns as soon as the stop control is accepted, so the start
-// that follows it is a request made while this process is still finishing its
-// in-flight cycle; the control manager answering "already running" means the
-// stop it was given has not completed yet, which is the expected ordering and
-// not an error.
-func restartWindows(ctx context.Context, cfg Config) error {
-	if err := runSC(ctx, cfg, "stop", Name); err != nil {
-		return err
-	}
-
-	result, err := cfg.Runner.Run(ctx, scProgram, "start", Name)
-	if err != nil {
-		return err
-	}
-	if result.ExitCode != 0 && result.ExitCode != errServiceAlreadyRunning {
-		return fmt.Errorf("sc.exe start %s failed with exit code %d%s",
-			Name, result.ExitCode, detail(output(result.Stderr, result.Stdout)))
-	}
-	return nil
 }
 
 // runSC runs one sc.exe subcommand and turns a non-zero exit into an error

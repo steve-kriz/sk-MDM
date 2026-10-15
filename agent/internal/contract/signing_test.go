@@ -225,7 +225,7 @@ func TestVectorsCoverDeviceOpsOnly(t *testing.T) {
 	for _, vector := range vectors {
 		// Path should start with /api/v1/devices/
 		if len(vector.Path) < len("/api/v1/devices/") ||
-		   vector.Path[:len("/api/v1/devices/")] != "/api/v1/devices/" {
+			vector.Path[:len("/api/v1/devices/")] != "/api/v1/devices/" {
 			t.Errorf("Vector %s: path should start with /api/v1/devices/", vector.Name)
 		}
 

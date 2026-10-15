@@ -33,8 +33,13 @@ import {
 export { CLOCK_SKEW_SECONDS, DEFAULT_CACHE_TTL_SECONDS, SIGNING_ALGORITHM, isVerifyFailure };
 export type { EpochSecondsClock, JsonWebKey, JwksDocument, JwksFetcher, TokenClaims, VerifyFailure };
 
-/** The app role that grants admin, independently of group membership. */
-export const ADMIN_ROLE = 'MDM.Admin';
+/**
+ * The app role that grants admin, independently of group membership. Entra
+ * keeps app-role and exposed-scope values in one namespace, so this cannot be
+ * `MDM.Admin`: that value is the delegated scope the console signs in with
+ * (`ADMIN_SCOPE_NAME` in ui/config.ts).
+ */
+export const ADMIN_ROLE = 'MDM.Administrator';
 
 export interface TokenVerifierOptions {
   /** Entra tenant id; fixes the expected issuer. */

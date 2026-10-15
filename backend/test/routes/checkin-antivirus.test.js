@@ -343,3 +343,102 @@ test('Scenario: Check-in without findings leaves stored findings and compliance 
   const profile2 = table.getStoredItem(deviceProfile(deviceId));
   assert.strictEqual(profile2.complianceState, 'compliant');
 });
+
+// ============================================================================
+// TASK-058 AC21: Extended finding fields are stored and bounded
+// ============================================================================
+
+test('Scenario: AC21 - Extended finding fields are stored and bounded', async (t) => {
+  const table = new FakeTable();
+  const deviceId = 'd1';
+  table.seedItem({ ...deviceProfile(deviceId), deviceId, hostname: 'host-d1' });
+
+  const handler = createCheckInHandler({
+    table,
+    pepper: 'a'.repeat(64),
+    now: () => new Date('2026-10-03T01:00:00Z'),
+    verifyDevice: createFakeVerifier(deviceId, true),
+  });
+
+  const finding = validFinding('F1', {
+    status: 'quarantined',
+    action: 'bogus',
+    category: 'c'.repeat(100),
+    processName: 'p'.repeat(300),
+    user: 7,
+    active: 'true',
+    remediatedAt: 'yesterday',
+  });
+
+  const result = await handler(createCheckInRequest(deviceId, { antivirusFindings: [finding] }));
+  assert.strictEqual(result.statusCode, 200);
+
+  const stored = table.getStoredItem(deviceAntivirusFinding(deviceId, 'F1'));
+  assert.strictEqual(stored.status, 'quarantined');
+  assert.strictEqual(stored.action, 'unknown');
+  assert.strictEqual(stored.category.length, 64);
+  assert.strictEqual(stored.processName.length, 260);
+  assert.ok(!('user' in stored), 'user should be omitted: it was not a string');
+  assert.ok(!('active' in stored), 'active should be omitted: it was not a boolean');
+  assert.ok(!('remediatedAt' in stored), 'remediatedAt should be omitted: not ISO-8601 UTC');
+});
+
+test('Scenario: AC21 - A finding with none of the new fields stores only the original attributes', async (t) => {
+  const table = new FakeTable();
+  const deviceId = 'd1';
+  table.seedItem({ ...deviceProfile(deviceId), deviceId, hostname: 'host-d1' });
+
+  const handler = createCheckInHandler({
+    table,
+    pepper: 'a'.repeat(64),
+    now: () => new Date('2026-10-03T01:00:00Z'),
+    verifyDevice: createFakeVerifier(deviceId, true),
+  });
+
+  const result = await handler(createCheckInRequest(deviceId, { antivirusFindings: [validFinding('F1')] }));
+  assert.strictEqual(result.statusCode, 200);
+
+  const stored = table.getStoredItem(deviceAntivirusFinding(deviceId, 'F1'));
+  const expectedKeys = [
+    'pk', 'sk', 'deviceId', 'findingId', 'threatName', 'severity', 'detectedAt',
+    'resources', 'remediated', 'firstReportedAt', 'lastReportedAt',
+  ].sort();
+  assert.deepStrictEqual(Object.keys(stored).sort(), expectedKeys);
+});
+
+test('Scenario: AC21 - Valid extended fields are stored as reported', async (t) => {
+  const table = new FakeTable();
+  const deviceId = 'd1';
+  table.seedItem({ ...deviceProfile(deviceId), deviceId, hostname: 'host-d1' });
+
+  const handler = createCheckInHandler({
+    table,
+    pepper: 'a'.repeat(64),
+    now: () => new Date('2026-10-03T01:00:00Z'),
+    verifyDevice: createFakeVerifier(deviceId, true),
+  });
+
+  const finding = validFinding('F1', {
+    status: 'quarantined',
+    action: 'quarantine',
+    category: 'Trojan',
+    active: true,
+    lastStatusChangeAt: '2026-10-02T07:00:00Z',
+    remediatedAt: '2026-10-02T07:00:00Z',
+    processName: 'C:\\x.exe',
+    user: 'CONTOSO\\a',
+  });
+
+  const result = await handler(createCheckInRequest(deviceId, { antivirusFindings: [finding] }));
+  assert.strictEqual(result.statusCode, 200);
+
+  const stored = table.getStoredItem(deviceAntivirusFinding(deviceId, 'F1'));
+  assert.strictEqual(stored.status, 'quarantined');
+  assert.strictEqual(stored.action, 'quarantine');
+  assert.strictEqual(stored.category, 'Trojan');
+  assert.strictEqual(stored.active, true);
+  assert.strictEqual(stored.lastStatusChangeAt, '2026-10-02T07:00:00Z');
+  assert.strictEqual(stored.remediatedAt, '2026-10-02T07:00:00Z');
+  assert.strictEqual(stored.processName, 'C:\\x.exe');
+  assert.strictEqual(stored.user, 'CONTOSO\\a');
+});

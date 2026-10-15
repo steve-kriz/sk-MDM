@@ -3,17 +3,20 @@
 // A check-in that answers with an agentRelease is the whole trigger: Apply
 // downloads the build, refuses it unless its SHA-256 is the one the backend
 // published and unless its version is actually ahead of this one, swaps it for
-// the installed binary and asks the service manager to restart the agent.
+// the installed binary and hands the restart to the service manager.
 //
 // The swap is deliberately one-way and the verification is deliberately not
 // part of it. Apply leaves the binary it replaced at <path>.old, writes
-// <path>.update-pending naming the version it installed, and restarts the
-// service as its very last action -- which kills the process that is running
-// Apply. Nothing after that restart could be run by this process, so whether
-// the new build actually works is settled by the build itself: the next process
-// to start calls RollbackIfUnhealthy, which finds the marker, compares it with
-// the version it was compiled as, and either clears the marker or puts the old
-// binary back and restarts again.
+// <path>.update-pending naming the version it installed, and, as its very last
+// action, returns the Restart hook's error -- in production
+// service.ErrRestartRequired, which ends the process so the service manager
+// restarts it onto the new binary (exit-to-restart: the agent never issues a
+// service-manager command against itself). Nothing after that restart is run
+// by this process, so whether the new build actually works is settled by the
+// build itself: the next process to start calls RollbackIfUnhealthy, which
+// finds the marker, compares it with the version it was compiled as, and
+// either clears the marker or puts the old binary back and exits to restart
+// again.
 //
 // Everything that touches the host -- the filesystem, the download and the
 // restart -- arrives through Deps, so the whole package runs in a test with no
@@ -24,6 +27,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -31,6 +35,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/officehq/sk-mdm/agent/internal/contract"
 	"github.com/officehq/sk-mdm/agent/internal/logging"
@@ -79,18 +84,32 @@ type Deps struct {
 	// Path is the installed agent binary: the file that is replaced.
 	Path string
 
-	// Restart asks the service manager to restart the agent. Left nil,
-	// nothing is restarted and the new build takes over at the next start.
+	// Restart hands the restart of the agent to the service manager. In
+	// production it is service.Restart, which runs no command and returns
+	// service.ErrRestartRequired; Apply and RollbackIfUnhealthy return that
+	// error unchanged so the process exits and the service manager starts
+	// it again. Left nil, nothing is restarted and the new build takes over
+	// at the next start.
 	Restart func(ctx context.Context) error
 
 	// CurrentVersion is the version of the running build. Empty means
 	// version.Version, which is what the production wiring leaves it as; a
 	// test sets it to drive the upgrade check and the health check.
 	CurrentVersion string
+
+	// Clock stamps the rollback record. Nil means the system time.
+	Clock platform.Clock
 }
+
+// RollbackSuffix names the record a rollback leaves for the next process to
+// report. The marker format (PendingSuffix) is unchanged by it.
+const RollbackSuffix = ".update-rollback"
 
 // OldPath is where the binary an update replaced is kept.
 func OldPath(path string) string { return path + OldSuffix }
+
+// RollbackPath is where the rollback record is written.
+func RollbackPath(path string) string { return path + RollbackSuffix }
 
 // PendingPath is where the marker naming the installed version is written.
 func PendingPath(path string) string { return path + PendingSuffix }
@@ -169,9 +188,13 @@ func Apply(ctx context.Context, rel contract.AgentRelease, deps *Deps) error {
 // The marker <path>.update-pending is the whole question: absent, there is
 // nothing to settle and nothing is touched. Present and naming the version this
 // build was compiled as, the swap worked -- the marker and the replaced binary
-// are deleted and the update is over. Present and naming anything else, the
-// binary that is running is not the one that was installed, so the replaced
-// build is put back and the service is restarted onto it.
+// are deleted and the update is over. Present and naming an older version than
+// this build, the update was superseded -- an installer put a newer build in
+// place after it -- so the marker and the replaced binary are deleted and
+// nothing is rolled back: putting the replaced build back would downgrade the
+// newer install. Present and naming anything else, the binary that is running
+// is not the one that was installed, so the replaced build is put back and the
+// service is restarted onto it.
 func RollbackIfUnhealthy(deps *Deps) error {
 	if deps == nil {
 		return errors.New("update: nil deps")
@@ -202,6 +225,22 @@ func RollbackIfUnhealthy(deps *Deps) error {
 		return deps.remove(OldPath(deps.Path))
 	}
 
+	if _, readable := parseVersion(installed); readable && isUpgrade(installed, current) {
+		// A newer build than the update installed is running: a reinstall
+		// replaced it. The update is over; its leftovers only go.
+		if err := deps.FS.Remove(pending); err != nil {
+			return err
+		}
+		if err := deps.remove(OldPath(deps.Path)); err != nil {
+			return err
+		}
+		deps.log(logging.LevelInfo, "update superseded by a newer install",
+			logging.F("installedVersion", installed),
+			logging.F("runningVersion", current),
+		)
+		return nil
+	}
+
 	if err := deps.FS.Rename(OldPath(deps.Path), deps.Path); err != nil {
 		return err
 	}
@@ -214,7 +253,88 @@ func RollbackIfUnhealthy(deps *Deps) error {
 		logging.F("runningVersion", current),
 	)
 
+	// The record survives this process's exit so the next one can report the
+	// rollback; a failed write costs the report, never the rollback.
+	if err := deps.writeRollbackRecord(installed, current); err != nil {
+		deps.log(logging.LevelWarn, "update rollback record not written",
+			logging.F("error", err.Error()),
+		)
+	}
+
 	return deps.restart(context.Background())
+}
+
+// RollbackRecord is what RollbackIfUnhealthy leaves at <path>.update-rollback
+// for the next process to report: the version the update installed, the
+// version of the build that rolled it back and when.
+type RollbackRecord struct {
+	InstalledVersion string
+	RunningVersion   string
+	OccurredAt       time.Time
+}
+
+// rollbackRecordFile is the on-disk JSON form of a RollbackRecord.
+type rollbackRecordFile struct {
+	InstalledVersion string `json:"installedVersion"`
+	RunningVersion   string `json:"runningVersion"`
+	OccurredAt       string `json:"occurredAt"`
+}
+
+// rollbackTimeFormat is the record's occurredAt format: ISO-8601 UTC to the
+// second.
+const rollbackTimeFormat = "2006-01-02T15:04:05Z"
+
+// writeRollbackRecord writes RollbackPath(d.Path) with MarkerFileMode.
+func (d *Deps) writeRollbackRecord(installed, running string) error {
+	data, err := json.Marshal(rollbackRecordFile{
+		InstalledVersion: installed,
+		RunningVersion:   running,
+		OccurredAt:       d.now().UTC().Format(rollbackTimeFormat),
+	})
+	if err != nil {
+		return err
+	}
+	return d.FS.WriteFile(RollbackPath(d.Path), data, MarkerFileMode)
+}
+
+// TakeRollbackRecord reads and deletes the record a rollback left at
+// RollbackPath(deps.Path). An absent file returns false and touches nothing.
+// A record that is not valid JSON with a non-empty installedVersion and an
+// RFC 3339 occurredAt is deleted, logged at warn and returns false. A failed
+// delete is logged at warn and does not change the result.
+func TakeRollbackRecord(deps *Deps) (RollbackRecord, bool) {
+	if deps == nil || deps.FS == nil || deps.Path == "" {
+		return RollbackRecord{}, false
+	}
+	path := RollbackPath(deps.Path)
+	data, err := deps.FS.ReadFile(path)
+	if err != nil {
+		if !errors.Is(err, fs.ErrNotExist) {
+			deps.log(logging.LevelWarn, "update rollback record unreadable",
+				logging.F("error", err.Error()),
+			)
+		}
+		return RollbackRecord{}, false
+	}
+
+	if err := deps.FS.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		deps.log(logging.LevelWarn, "update rollback record not deleted",
+			logging.F("error", err.Error()),
+		)
+	}
+
+	var file rollbackRecordFile
+	if err := json.Unmarshal(data, &file); err == nil && file.InstalledVersion != "" {
+		if at, err := time.Parse(time.RFC3339, file.OccurredAt); err == nil {
+			return RollbackRecord{
+				InstalledVersion: file.InstalledVersion,
+				RunningVersion:   file.RunningVersion,
+				OccurredAt:       at,
+			}, true
+		}
+	}
+	deps.log(logging.LevelWarn, "update rollback record unreadable")
+	return RollbackRecord{}, false
 }
 
 // download fetches the build, refusing anything the endpoint did not answer
@@ -262,6 +382,14 @@ func (d *Deps) restart(ctx context.Context) error {
 		return nil
 	}
 	return d.Restart(ctx)
+}
+
+// now is the Clock's time, or the system time when no clock was given.
+func (d *Deps) now() time.Time {
+	if d.Clock == nil {
+		return time.Now()
+	}
+	return d.Clock.Now()
 }
 
 // currentVersion is the version of the running build.

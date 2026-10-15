@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io/fs"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/officehq/sk-mdm/agent/internal/contract"
@@ -47,6 +48,9 @@ type Domains struct {
 	FS     platform.FileSystem
 	GOOS   string
 	Logger *logging.Logger
+	// Actions, when set, is told once each time Apply rewrote the hosts file,
+	// whether or not the DNS flush that follows succeeds. Nil records nothing.
+	Actions func(actionType string, details map[string]string)
 }
 
 // Name is "domains".
@@ -85,6 +89,9 @@ func (d *Domains) Apply(ctx context.Context, effective map[string]any, _ contrac
 
 	if err := platform.WriteFileAtomic(d.FS, path, next, HostsFileMode); err != nil {
 		return fmt.Errorf("write hosts file: %w", err)
+	}
+	if d.Actions != nil {
+		d.Actions(contract.ActionDomainsUpdated, map[string]string{"blockedCount": strconv.Itoa(len(names))})
 	}
 	return d.flush(ctx)
 }

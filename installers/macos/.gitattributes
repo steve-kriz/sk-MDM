@@ -4,3 +4,4 @@
 *.sh text eol=lf
 preinstall text eol=lf
 postinstall text eol=lf
+*.command text eol=lf

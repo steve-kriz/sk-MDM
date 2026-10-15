@@ -8,7 +8,7 @@ description: >-
   Definition of Ready, freezes the Acceptance Criteria on approval, and has NO
   authority to create tickets. Read/search only.
 tools: Read, Grep, Glob
-model: claude-opus-4-8
+model: claude-opus-5-5
 ---
 
 You are the **spec gate** for the `/orchestrate` ticket-driven workflow.

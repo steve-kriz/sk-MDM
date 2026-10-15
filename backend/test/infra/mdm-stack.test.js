@@ -227,7 +227,7 @@ test('E2E: Scenario: Role policy is scoped to the table and the one secret', asy
     for (const action of actions) {
       const service = action.split(':')[0];
       assert.ok(
-        ['dynamodb', 'secretsmanager', 's3'].includes(service),
+        ['dynamodb', 'secretsmanager', 's3', 'logs', 'lambda'].includes(service),
         `Only dynamodb, secretsmanager and s3 services allowed, found: ${service}`
       );
     }
@@ -584,7 +584,8 @@ test('Unit: Only one DynamoDB table exists', async (t) => {
 test('Unit: Only one Lambda function exists', async (t) => {
   const { template } = createTestStack();
   const functions = template.findResources('AWS::Lambda::Function');
-  assert.strictEqual(Object.keys(functions).length, 1, 'Should have exactly one Lambda function');
+  // TASK-050: the API function and the URL hasher.
+  assert.strictEqual(Object.keys(functions).length, 2, 'Should have exactly two Lambda functions');
 });
 
 test('Unit: Only one Lambda Function URL exists', async (t) => {
@@ -694,20 +695,23 @@ test('E2E: Scenario: Lambda can only read installers and list the bucket', async
     (s) => actionsOf(s).length === 1 && actionsOf(s)[0] === 's3:GetObject'
   );
   assert.strictEqual(getObjectStatements.length, 1, 'Should have exactly one s3:GetObject statement');
+  // TASK-048/TASK-049: exactly three object resources, "installers/*", "agent/*" and "applications/*"
   const getObjectResources = resourcesOf(getObjectStatements[0]);
-  assert.strictEqual(getObjectResources.length, 1);
-  const getObjectResource = getObjectResources[0];
-  assert.ok(
-    typeof getObjectResource === 'object' && getObjectResource['Fn::Join'],
-    'GetObject resource should be the bucket ARN joined with /installers/*'
-  );
-  const joinParts = getObjectResource['Fn::Join'][1];
-  assert.ok(joinParts.some((part) => typeof part === 'string' && part.includes('/installers/*')));
-  assert.ok(
-    joinParts.some(
-      (part) => typeof part === 'object' && (part['Fn::GetAtt']?.[0] === bucketLogicalId || part.Ref === bucketLogicalId)
-    )
-  );
+  assert.strictEqual(getObjectResources.length, 3);
+  for (const [index, suffix] of ['/installers/*', '/agent/*', '/applications/*'].entries()) {
+    const getObjectResource = getObjectResources[index];
+    assert.ok(
+      typeof getObjectResource === 'object' && getObjectResource['Fn::Join'],
+      `GetObject resource should be the bucket ARN joined with ${suffix}`
+    );
+    const joinParts = getObjectResource['Fn::Join'][1];
+    assert.ok(joinParts.some((part) => typeof part === 'string' && part.includes(suffix)));
+    assert.ok(
+      joinParts.some(
+        (part) => typeof part === 'object' && (part['Fn::GetAtt']?.[0] === bucketLogicalId || part.Ref === bucketLogicalId)
+      )
+    );
+  }
 
   // And exactly one other S3 statement allows only "s3:ListBucket" on the bucket ARN
   const listBucketStatements = inlinePolicyStatements.filter(
@@ -722,10 +726,20 @@ test('E2E: Scenario: Lambda can only read installers and list the bucket', async
     'ListBucket resource should be the bucket ARN itself'
   );
 
-  // And no statement allows "s3:PutObject", "s3:DeleteObject" or "s3:*"
+  // And no statement allows "s3:PutObject" (TASK-049: except the one statement on
+  // exactly "applications/*"), "s3:DeleteObject" or "s3:*"
   for (const statement of inlinePolicyStatements) {
     const actions = actionsOf(statement);
-    assert.ok(!actions.includes('s3:PutObject'), 'No statement should allow s3:PutObject');
+    if (actions.includes('s3:PutObject')) {
+      const resources = resourcesOf(statement);
+      assert.deepStrictEqual(actions, ['s3:PutObject'], 'PutObject should be granted on its own');
+      assert.strictEqual(resources.length, 1, 'PutObject should be granted on exactly one resource');
+      const joinParts = resources[0]?.['Fn::Join']?.[1] ?? [];
+      assert.ok(
+        joinParts.some((part) => typeof part === 'string' && part.includes('/applications/*')),
+        'PutObject should be granted only on applications/*'
+      );
+    }
     assert.ok(!actions.includes('s3:DeleteObject'), 'No statement should allow s3:DeleteObject');
     assert.ok(!actions.includes('s3:*'), 'No statement should allow s3:*');
   }
@@ -735,6 +749,21 @@ test('E2E: Scenario: Lambda can only read installers and list the bucket', async
     const resources = resourcesOf(statement);
     assert.ok(!resources.includes('*'), 'No statement should use Resource "*"');
   }
+});
+
+test('E2E: Scenario: Stack permissions and CORS for uploads -- the installer bucket has exactly one PUT-only CORS rule', async (t) => {
+  // When I synthesise MdmStack
+  const { template } = createTestStack();
+  const buckets = template.findResources('AWS::S3::Bucket');
+  const bucketLogicalId = Object.keys(buckets)[0];
+  const bucket = buckets[bucketLogicalId];
+
+  // Then the installer bucket has one CORS rule with methods [PUT], origins ["*"], headers ["*"]
+  const corsRules = bucket.Properties.CorsConfiguration?.CorsRules ?? [];
+  assert.strictEqual(corsRules.length, 1, 'expected exactly one CORS rule');
+  assert.deepStrictEqual(corsRules[0].AllowedMethods, ['PUT']);
+  assert.deepStrictEqual(corsRules[0].AllowedOrigins, ['*']);
+  assert.deepStrictEqual(corsRules[0].AllowedHeaders, ['*']);
 });
 
 test('E2E: Scenario: Bucket name is a stack output', async (t) => {
@@ -755,9 +784,9 @@ test('E2E: Scenario: No custom-resource Lambda is introduced', async (t) => {
   // Given a synthesised MdmStack template
   const { template } = createTestStack();
 
-  // Then the template contains exactly one AWS::Lambda::Function
+  // Then the template contains exactly two AWS::Lambda::Function (TASK-050: the API function and the URL hasher)
   const functions = template.findResources('AWS::Lambda::Function');
-  assert.strictEqual(Object.keys(functions).length, 1, 'Should have exactly one Lambda function');
+  assert.strictEqual(Object.keys(functions).length, 2, 'Should have exactly two Lambda functions');
 });
 
 test('Unit: MdmStack exposes an installerBucket property', async (t) => {
@@ -787,11 +816,14 @@ test('E2E: Scenario: No domain configured leaves the stack as it was', async (t)
   assert.deepStrictEqual(
     Object.keys(env).sort(),
     [
+      'BEDROCK_MODEL_ID',
       'ENTRA_ADMIN_GROUP_ID',
       'ENTRA_CLIENT_ID',
       'ENTRA_TENANT_ID',
       'GRAPH_SECRET_ID',
       'GRAPH_SECRET_KEY',
+      'HASHER_FUNCTION_NAME',
+      'HEARTBEAT_LOG_GROUP',
       'INSTALLER_BUCKET',
       'PEPPER_SECRET_ARN',
       'TABLE_NAME',
@@ -901,8 +933,8 @@ test('E2E: Scenario: Function URL stays public for already-installed agents', as
   // And there are exactly two AWS::Lambda::Permission resources
   assert.strictEqual(Object.keys(template.findResources('AWS::Lambda::Permission')).length, 2);
 
-  // And there is exactly one AWS::Lambda::Function
-  assert.strictEqual(Object.keys(template.findResources('AWS::Lambda::Function')).length, 1);
+  // And there are exactly two AWS::Lambda::Function (TASK-050: the API function and the URL hasher)
+  assert.strictEqual(Object.keys(template.findResources('AWS::Lambda::Function')).length, 2);
 });
 
 test('E2E: Scenario: Lambda learns its public host as literals', async (t) => {
@@ -1119,11 +1151,14 @@ test('Unit: domain-configured env still carries all sibling-ticket keys', async 
   assert.deepStrictEqual(
     Object.keys(env).sort(),
     [
+      'BEDROCK_MODEL_ID',
       'ENTRA_ADMIN_GROUP_ID',
       'ENTRA_CLIENT_ID',
       'ENTRA_TENANT_ID',
       'GRAPH_SECRET_ID',
       'GRAPH_SECRET_KEY',
+      'HASHER_FUNCTION_NAME',
+      'HEARTBEAT_LOG_GROUP',
       'INSTALLER_BUCKET',
       'PEPPER_SECRET_ARN',
       'PUBLIC_HOST',
@@ -1131,4 +1166,158 @@ test('Unit: domain-configured env still carries all sibling-ticket keys', async 
       'TABLE_NAME',
     ].sort()
   );
+});
+
+// ============================================================================
+// TASK-053: AI script generation -- bedrockModelId env var and IAM permission
+// ============================================================================
+
+const HAIKU_FOUNDATION_MODEL_ID = 'anthropic.claude-haiku-4-5-20251001-v1:0';
+const HAIKU_INFERENCE_PROFILE_ID = 'au.anthropic.claude-haiku-4-5-20251001-v1:0';
+
+/** Every inline statement naming at least one `bedrock:` action, across every IAM::Policy resource. */
+function bedrockStatements(template) {
+  const iamPolicies = template.findResources('AWS::IAM::Policy');
+  const inlinePolicyStatements = Object.values(iamPolicies).flatMap(
+    (policy) => policy.Properties.PolicyDocument.Statement
+  );
+  function actionsOf(statement) {
+    return Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+  }
+  return inlinePolicyStatements.filter((s) => actionsOf(s).some((a) => typeof a === 'string' && a.startsWith('bedrock:')));
+}
+
+function actionsOf(statement) {
+  return Array.isArray(statement.Action) ? statement.Action : [statement.Action];
+}
+
+function resourcesOf(statement) {
+  return Array.isArray(statement.Resource) ? statement.Resource : [statement.Resource];
+}
+
+/** True when a CDK intrinsic (a Fn::Join'd ARN, typically) textually contains every given substring. */
+function intrinsicContainsAll(resource, substrings) {
+  const text = JSON.stringify(resource);
+  return substrings.every((s) => text.includes(s));
+}
+
+// AC17
+test('E2E: Scenario: Lambda environment carries the model id', async (t) => {
+  // When I synthesise MdmStack with bedrockModelId "anthropic.claude-haiku-4-5-20251001-v1:0"
+  const appWithModel = new App();
+  const stackWithModel = new MdmStack(appWithModel, 'MdmStack', {
+    entraTenantId: 'test-tenant',
+    entraClientId: 'test-client',
+    bedrockModelId: HAIKU_FOUNDATION_MODEL_ID,
+  });
+  const templateWithModel = Template.fromStack(stackWithModel);
+  const envWithModel = Object.values(templateWithModel.findResources('AWS::Lambda::Function'))[0].Properties.Environment.Variables;
+
+  // Then ApiFunction's environment BEDROCK_MODEL_ID is "anthropic.claude-haiku-4-5-20251001-v1:0"
+  assert.strictEqual(envWithModel.BEDROCK_MODEL_ID, HAIKU_FOUNDATION_MODEL_ID);
+
+  // When I synthesise MdmStack with no bedrockModelId
+  const { template } = createTestStack();
+  const env = Object.values(template.findResources('AWS::Lambda::Function'))[0].Properties.Environment.Variables;
+
+  // Then ApiFunction's environment BEDROCK_MODEL_ID is ""
+  assert.strictEqual(env.BEDROCK_MODEL_ID, '');
+
+  // And the exact integrated environment key set now includes BEDROCK_MODEL_ID
+  assert.ok('BEDROCK_MODEL_ID' in env);
+});
+
+// AC17
+test('Unit: app.ts reads the model id setting from MDM_BEDROCK_MODEL_ID / bedrockModelId context', async (t) => {
+  // Then backend/src/infra/app.ts passes bedrockModelId from setting('MDM_BEDROCK_MODEL_ID', 'bedrockModelId')
+  const appSource = readFileSync(path.join(backendRoot, 'src/infra/app.ts'), 'utf8');
+  assert.match(appSource, /bedrockModelId:\s*setting\(\s*['"]MDM_BEDROCK_MODEL_ID['"]\s*,\s*['"]bedrockModelId['"]\s*\)/);
+});
+
+// AC18
+test('E2E: Scenario: IAM for a foundation model id', async (t) => {
+  // When I synthesise MdmStack with bedrockModelId "anthropic.claude-haiku-4-5-20251001-v1:0"
+  const app = new App();
+  const stack = new MdmStack(app, 'MdmStack', {
+    entraTenantId: 'test-tenant',
+    entraClientId: 'test-client',
+    bedrockModelId: HAIKU_FOUNDATION_MODEL_ID,
+  });
+  const template = Template.fromStack(stack);
+
+  // Then exactly one ApiFunction policy statement names a bedrock action
+  const statements = bedrockStatements(template);
+  assert.strictEqual(statements.length, 1);
+
+  // And its actions are exactly ["bedrock:InvokeModel"]
+  assert.deepStrictEqual(actionsOf(statements[0]), ['bedrock:InvokeModel']);
+
+  // And its only resource is the foundation-model ARN in the stack region for that id
+  const resources = resourcesOf(statements[0]);
+  assert.strictEqual(resources.length, 1);
+  assert.ok(
+    intrinsicContainsAll(resources[0], [':bedrock:', `foundation-model/${HAIKU_FOUNDATION_MODEL_ID}`]),
+    'the sole resource should be the regional foundation-model ARN',
+  );
+  // Not the wildcard-region form used for an inference profile's underlying model.
+  assert.ok(!intrinsicContainsAll(resources[0], ['bedrock:*']));
+});
+
+// AC18
+test('E2E: Scenario: IAM for an inference profile id', async (t) => {
+  // When I synthesise MdmStack with bedrockModelId "au.anthropic.claude-haiku-4-5-20251001-v1:0"
+  const app = new App();
+  const stack = new MdmStack(app, 'MdmStack', {
+    entraTenantId: 'test-tenant',
+    entraClientId: 'test-client',
+    bedrockModelId: HAIKU_INFERENCE_PROFILE_ID,
+  });
+  const template = Template.fromStack(stack);
+
+  const statements = bedrockStatements(template);
+  assert.strictEqual(statements.length, 1);
+  assert.deepStrictEqual(actionsOf(statements[0]), ['bedrock:InvokeModel']);
+
+  // Then the bedrock statement resources are exactly the inference-profile ARN for the given id
+  // and "arn:<partition>:bedrock:*::foundation-model/anthropic.claude-haiku-4-5-20251001-v1:0"
+  const resources = resourcesOf(statements[0]);
+  assert.strictEqual(resources.length, 2);
+  assert.ok(
+    resources.some((r) => intrinsicContainsAll(r, [':bedrock:', `inference-profile/${HAIKU_INFERENCE_PROFILE_ID}`])),
+    'one resource should be the inference-profile ARN',
+  );
+  assert.ok(
+    resources.some((r) => intrinsicContainsAll(r, ['bedrock:*', `foundation-model/${HAIKU_FOUNDATION_MODEL_ID}`])),
+    'the other resource should be the wildcard-region foundation-model ARN for the underlying model',
+  );
+});
+
+// AC18
+test('E2E: Scenario: No model id means no Bedrock permission', async (t) => {
+  // When I synthesise MdmStack with no bedrockModelId
+  const { template } = createTestStack();
+
+  // Then no ApiFunction policy statement names any "bedrock:" action
+  assert.strictEqual(bedrockStatements(template).length, 0);
+
+  // And no statement anywhere uses "bedrock:*"
+  const iamPolicies = template.findResources('AWS::IAM::Policy');
+  const allStatements = Object.values(iamPolicies).flatMap((policy) => policy.Properties.PolicyDocument.Statement);
+  for (const statement of allStatements) {
+    assert.ok(!actionsOf(statement).includes('bedrock:*'));
+  }
+});
+
+// AC18 (edge): no statement ever grants Bedrock on Resource "*"
+test('Unit: no Bedrock statement ever uses Resource "*"', async (t) => {
+  const app = new App();
+  const stack = new MdmStack(app, 'MdmStack', {
+    entraTenantId: 'test-tenant',
+    entraClientId: 'test-client',
+    bedrockModelId: HAIKU_INFERENCE_PROFILE_ID,
+  });
+  const template = Template.fromStack(stack);
+  for (const statement of bedrockStatements(template)) {
+    assert.ok(!resourcesOf(statement).includes('*'));
+  }
 });
